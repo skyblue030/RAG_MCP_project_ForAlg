@@ -1,0 +1,259 @@
+﻿檢索增強生成（RAG）系統中檢索失敗的應對：穩健上下文提供的綜合指南
+摘要
+檢索增強生成（RAG）系統透過整合大型語言模型（LLM）與外部知識，徹底改變了自然語言處理領域，使其能夠生成準確且可驗證的文本。然而，RAG 的效能關鍵取決於其檢索組件的有效性。本報告旨在探討 RAG 系統中檢索失敗所帶來的多方面挑戰，即人工智慧難以從其向量資料庫中找到相關上下文的問題。報告深入分析了常見原因，包括次優的文檔分塊、嵌入模型限制、無效的查詢理解以及資料品質問題。隨後，報告提出了先進的緩解策略，涵蓋優化的預處理、改進的嵌入模型、複雜的查詢處理以及諸如重新排名和混合檢索等穩健的檢索機制。此外，報告還探討了處理無法回答查詢和防止幻覺的關鍵技術，並概述了全面的評估和調試方法。本報告旨在為技術專業人員提供可操作的見解和路線圖，以構建穩健可靠的 RAG 系統。
+1. 引言：檢索在 RAG 系統中的關鍵作用
+檢索增強生成（RAG）已成為一種強大的範式，透過整合外部知識來增強自然語言生成能力 1。透過將大型語言模型（LLM）與外部資料庫連接，RAG 能夠產生既符合語境又基於權威、最新資訊的回應，這標誌著更複雜的自然語言處理（NLP）系統發展的重大進步 1。這種整合使得跨多種應用程式的準確、最新且可驗證的文本生成成為可能 1。RAG 的核心創新在於，它允許在訓練後對參數固定的神經語言模型進行額外的非參數優化，有效地擴展了它們的操作領域，同時保持了架構的穩定性 1。此外，RAG 能夠提供可靠且最新的外部知識，減少幻覺，並確保跨各種任務的相關上下文，這使其成為增強 LLM 效能的關鍵技術 2。
+然而，RAG 系統的效能高度依賴於其檢索組件的成功。檢索失敗發生在 RAG 系統無法從已嵌入的向量資料庫中找到與給定查詢相對應的上下文時 8。這種情況帶來了獨特的挑戰，因為 RAG 系統具有混合架構，結合了檢索和生成組件，並且依賴於動態知識來源 1。檢索到的文檔的相關性和品質直接影響 LLM 的最終輸出 10。當檢索失敗時，LLM 可能傾向於產生事實上不一致的輸出（幻覺），特別是在處理訓練資料之外的新資訊時 1。此外，檢索失敗可能導致回應不相關、資訊過時或來自非權威來源的回應，從而損害系統的可靠性 6。
+檢索失敗不僅僅是未能找到資訊，而是一個可能導致整個 RAG 系統效能下降的連鎖問題 5。如果初始檢索步驟存在缺陷，即使是最有能力的 LLM 也會產生不可靠的輸出，因為它所依據的資訊是錯誤的。這從根本上破壞了 RAG 的核心優勢——透過將 LLM 錨定在外部知識上來增強其可靠性。因此，確保穩健的檢索對於 RAG 系統的信任度和實用性至關重要，因為檢索階段的任何缺陷都會在整個管道中傳播。
+此外，RAG 的戰略價值超越了單純的減少幻覺。它使 LLM 能夠與不斷發展的現實世界進行互動並加以利用，從而將 LLM 從靜態知識庫轉變為動態、適應性強的系統 1。這種能力對於金融新聞、法律更新或科學研究等動態領域的應用至關重要。這也意味著 RAG 知識庫需要持續整合/持續部署（CI/CD）的心態，以確保其始終反映最新的資訊。
+2. 檢索失敗的診斷：常見原因及其表現
+理解檢索失敗的根本原因對於有效的緩解至關重要。這些問題通常源於 RAG 管道開發的基礎階段，影響人工智慧尋找相關上下文的能力。
+2.1 次優的文檔分塊與預處理
+文檔分塊的低效是檢索失敗的一個主要原因，可能導致資訊遺失、上下文雜訊或不相關的檢索，嚴重影響 RAG 管道的整體效能 8。最佳的分塊大小在檢索有效性方面起著關鍵作用，並且這個大小高度依賴於資料集特性和所使用的嵌入模型 13。例如，對於包含簡潔、事實性答案的資料集，較小的分塊（通常為 64-128 個詞元）被認為是最佳的，因為在這種情況下增加分塊大小可能會引入過多的上下文和雜訊，從而降低召回率 13。相反，對於需要更廣泛上下文理解或包含冗長、分散答案的資料集，則需要較大的分塊（512-1024 個詞元），因為更多的上下文有利於檢索 13。如果分塊過小，系統可能無法捕獲足夠的資訊來回答某些問題；如果過長，則可能引入不相關的資訊，導致檢索到的上下文產生雜訊 9。
+除了詞元數量之外，文檔結構、問題複雜性和答案局部性等因素也會顯著影響最佳分塊行為 13。僅基於文檔結構進行分塊可能會帶來弊端，包括對特定文檔格式的過度擬合，導致如果出現偏差則行為不可預測或錯誤 14。此外，此類方法可能過於依賴 PDF 提取庫、OCR 工具或視覺 LLM 準確檢測格式結構的可靠性 14。這裡的原則是，對於冗長的文檔，語義嵌入的準確性會降低，這強調了相關資訊通常包含在簡潔、主題連貫的段落中 15。
+2.2 嵌入模型的局限性
+檢索失敗的一個常見原因是使用通用嵌入模型，這些模型無法捕捉領域特定資料的語義細微差別 8。這種難以在推理時優先排序相關分塊的問題意味著，即使向量資料庫中存在適當的資訊，現成的嵌入模型也可能無法有效區分真正相關和不相關的分塊 8。通用文本嵌入模型儘管在通用檢索基準測試中表現出色，但在應用於包含專業術語和行話的私人資料集時，其檢索效能會顯著下降 16。這可能導致初始檢索步驟返回一組相關性混雜的候選文檔 10。
+此外，用於檢索的嵌入向量的高維性質（通常為數百到數千維）可能在儲存和延遲方面帶來顯著的可擴展性挑戰，特別是在處理大量文本語料庫時 17。這種計算開銷可能會阻礙即時或近即時場景中的高效檢索。通用嵌入模型也可能無法捕捉細微差別，例如，將元資料直接嵌入分塊中可能會使向量過於相似，導致「均值回歸」問題，從而產生誤報，即使語義相似度很高，上下文相關性卻很低 18。
+2.3 無效的查詢理解
+在真實世界的 RAG 系統中，用戶查詢通常涉及口語省略、對話上下文中的模糊引用，或者只是過於模糊或不完整 19。這使得 RAG 系統難以準確解釋用戶意圖，從而影響檢索準確性 19。此外，設計不佳的提示模板可能導致偏離目標的回應或缺乏所需特異性的輸出，這就像提供了不完整的指示 8。在多輪對話中，這個問題尤為突出，因為當前查詢依賴於之前的輪次。系統需要解決歧義並從對話上下文中恢復遺失的元素（例如，回指），以便正確闡明用戶的資訊需求 19。缺乏意圖識別會導致系統檢索不相關的資訊，即使知識庫中包含答案也是如此 1。
+2.4 資料品質、覆蓋範圍和索引問題
+底層資料的品質和覆蓋範圍是 RAG 效能的基礎。缺乏完整覆蓋的 RAG 系統可能導致 LLM 沒有上下文可供參考，顯著增加幻覺的可能性 8。此外，如果系統包含策劃不當的文檔，它可能會向最終用戶提供誤導性、不正確或過時的資訊，從而損害系統的可信度 6。
+高效的向量檢索依賴於穩健的索引演算法，這對於用於語義檢索和資訊檢索的大規模 RAG 系統至關重要 21。近似最近鄰（ANN）索引用於解決大型、高維資料集上精確 K 近鄰（KNN）檢索的計算不可行性問題，以犧牲可控的檢索準確性（召回率）來顯著降低延遲 22。
+* 倒排文件（IVF）：這種方法使用 k-means 等演算法將向量分組到簇中。在查詢期間，系統首先識別最近的質心，然後僅在這些特定簇內進行檢索，從而大大減少計算量。IVF 適用於大型資料集，但需要預訓練來定義簇，並且其準確性取決於簇的品質 23。與圖形索引相比，IVF 面臨顯著的檢索延遲差距 21。
+* 分層可導航小世界（HNSW）：HNSW 構建一個分層圖結構，其中每個層都是前一層的子集，頂層稀疏，底層更密集。查詢從頂層開始檢索，導航到附近的節點，然後在較低層細化路徑，從而實現快速近似檢索。HNSW 在查詢速度和召回率方面表現出色，但由於圖形儲存需要更多記憶體 23。
+* 乘積量化（PQ）：PQ 將向量壓縮成更小的代碼，以減少記憶體使用並加速距離計算。它透過將向量分成子向量來實現這一點。雖然它顯著減少記憶體並加速計算，但由於壓縮過程會犧牲一些準確性，因此不太適合高精度任務 23。PQ 通常與 IVF（IVF-PQ）結合使用以進行混合優化 23。
+這些 ANN 索引在檢索速度和準確性之間進行權衡 22。現有索引的配置（例如，IVF 的 nprobe，HNSW 的圖形度）顯著影響其效能 21。處理頻繁插入和刪除以及非均勻、演進查詢模式的動態工作負載對現有索引提出了挑戰。這可能導致查詢延遲增加和召回率隨時間降低，因為它們可能無法有效地適應不斷變化的資料分佈或存取模式 21。
+RAG 系統的優化需要一種整體方法，而不是零碎的解決方案。文檔分塊、嵌入、索引和查詢理解等每個組件都是潛在的瓶頸，它們的缺陷會相互疊加，導致整個系統的脆弱性。例如，一個完美的嵌入模型無法彌補糟糕的分塊，反之亦然。這就要求進行整合評估和調整。
+在分塊策略中，存在著「語義精確性與上下文廣度」的固有權衡。較小的分塊對於事實性答案更為精確，而較大的分塊則有利於更廣泛的上下文理解 13。這表明單一的「一刀切」分塊策略本質上是次優的。有效的 RAG 系統可能需要採用適應性或多策略的分塊方法，例如根據內容性質或預期查詢類型結合不同的分塊大小或語義分塊方法。
+此外，通用嵌入模型在領域特定資料上表現不佳，這凸顯了對專業化的需求 8。這意味著 RAG 開發人員面臨一個戰略決策點：是投資於針對特定領域微調或調整通用模型，還是接受在專業查詢上效能較低。趨勢表明，領域適應是企業或利基應用中實現高效能 RAG 的必要步驟，超越了簡單的「現成」解決方案。
+下表總結了 RAG 檢索失敗的常見模式及其表現，並簡要概述了初步的解決方案，為技術專業人員提供診斷參考。
+表 1：常見 RAG 檢索失敗模式與解決方案
+
+
+失敗類別
+	具體表現/問題
+	對 RAG 效能的影響
+	初步解決方案
+	相關參考
+	文檔分塊
+	分塊過小或過大
+	資訊遺失、雜訊上下文、不相關檢索
+	調整分塊大小與重疊、採用語義分塊
+	8
+	嵌入模型
+	語義鴻溝、領域不匹配
+	無法捕捉領域細微差別、相關性排序不佳
+	領域特定微調、嵌入壓縮
+	8
+	查詢理解
+	模糊、不完整或複雜查詢
+	意圖誤解、檢索不相關上下文
+	查詢重寫、查詢擴展、查詢分解
+	19
+	資料品質
+	內容遺失或過時
+	幻覺、提供誤導性資訊
+	確保資料覆蓋、定期更新知識庫
+	6
+	索引問題
+	索引效率低下、動態工作負載適應性差
+	檢索延遲增加、召回率降低
+	優化向量資料庫索引配置、考慮自適應索引
+	21
+	3. 增強 RAG 檢索效能的先進策略
+3.1 優化文檔預處理和索引
+為了提高 RAG 系統的檢索效能，必須採用更精細的文檔預處理和索引策略。
+* 自適應與語義分塊策略：
+   * 超越固定大小的分塊，語義分塊技術旨在識別文本中的自然斷點，以提高檢索精確度，儘管這通常會增加預處理的複雜性 15。
+   * 例如，ChunkRAG 透過語義分塊和分塊級別評估來優化資訊選擇，根據餘弦相似度將文檔分割成語義連貫、可變長度的部分 26。
+   * 「父子檢索」（Parent-Child retrieval）等策略涉及創建用於嵌入的較小分塊（針對上下文長度進行優化），這些分塊連結到包含更多上下文的較大分塊。這允許從較小的分塊中進行準確檢索，同時為生成提供更廣泛的上下文 27。
+   * 分層索引（Hierarchical indexing）則將文檔總結成段落，用於第一遍檢索，然後從原始文檔中過濾出相關分塊，進行第二遍更具針對性的檢索 27。
+* 戰略性元資料整合與過濾：
+   * 元資料過濾可以顯著提高檢索準確性 27。如果預先知道元資料，最好在執行向量檢索之前先根據元資料進行過濾 18。
+   * 將元資料直接嵌入分塊中可能會產生好壞參半的結果：一些評估顯示其有積極影響，但它也可能導致「均值回歸」，使分塊變得過於相似，難以區分，特別是如果嵌入模型未經此類半結構化資料的訓練 18。
+   * 替代策略包括單獨追蹤元資料、使用命名實體識別（NER）添加標籤，以及在單獨的欄位中添加元資料以進行混合檢索調整 18。
+3.2 提高嵌入模型效能
+提升嵌入模型的效能對於彌補語義鴻溝和領域不匹配至關重要。
+* 領域特定微調與適應：
+   * 對通用嵌入模型進行微調，使其與私人或領域特定資料集對齊，對於克服語義鴻溝和領域不匹配至關重要 16。
+   * BMEmbed 是一種新穎的框架，它利用基於關鍵字的檢索來調整通用文本嵌入模型以適應私人資料集。它生成合成查詢，並使用 BM25 構建相關和不相關的樣本，用於列表式微調，從而持續提高檢索準確性 16。
+   * 針對企業環境進行微調，例如使用 EnterpriseEM，可以調整嵌入以適應專有非結構化資料，從而增強對企業術語的理解並改進答案的排名 25。
+* 嵌入壓縮技術：
+   * 高維嵌入可以使用主成分分析（PCA）等技術進行壓縮，以減少索引大小和查詢延遲，通常對檢索準確性影響最小 17。這在檢索準確性和計算成本之間提供了靈活的權衡 17。
+3.3 增強查詢處理和理解
+精確的查詢處理和理解是高效 RAG 系統的基石。
+* 查詢重寫與擴展：
+   * 查詢重寫對於處理多輪對話中的模糊查詢、口語省略和模糊引用至關重要，將它們轉換為更精確的形式以進行檢索 19。
+   * 技術包括基於 LLM 的查詢擴展、細化和後續問題建議 20。
+   * MaFeRw（帶有多方面回饋的查詢重寫）透過整合檢索和生成過程的回饋來提高 RAG 效能，使用密集獎勵以實現更穩定的訓練 19。
+   * HyDE（假設文檔嵌入）涉及使用 LLM 根據查詢生成一個假設文檔，然後嵌入這個虛擬文檔以在知識庫中找到相似的分塊 27。
+* 查詢分解：
+   * 對於複雜問題，查詢分解將查詢分解為更簡單的子問題，然後可以單獨回答並組合起來 27。
+3.4 實施先進的檢索機制
+* 重新排名：
+   * 重新排名器從初始檢索到的候選文檔池中選擇最相關的文檔，顯著提高生成回應的品質 10。它們透過精煉檢索到的文檔選擇來解決初始檢索缺陷 10。
+   * 交叉編碼器（Cross-encoders）：與傳統模型不同，交叉編碼器將查詢和文檔「一起」評估，捕捉細微的關係並分配高度準確的相關性分數 29。它們是處理複雜查詢的理想選擇，但會引入計算開銷 10。
+   * 多遍檢索（Multi-pass retrieval）：第一遍進行廣泛檢索（例如，使用雙編碼器），第二遍則對前 K 個結果使用細粒度重新排名器（例如，交叉編碼器），以平衡速度和精確度 27。
+   * 可信度過濾：重新排名器可以設計為降低不可信來源的排名，確保輸出基於權威資訊 29。
+* 混合檢索：
+   * 混合檢索結合了稀疏（例如，BM25）和密集（例如，DPR）檢索方法，以利用詞彙重疊和語義關係，提供優於單一方法的效能 27。
+   * 稀疏檢索器（Sparse Retrievers）：例如 BM25，擅長透過詞頻計算進行精確的關鍵字匹配 32。
+   * 密集檢索器（Dense Retrievers）：例如 DPR，利用向量嵌入來捕捉超越詞彙重疊的語義關係 31。
+   * 混合系統通常使用融合演算法（例如，倒數排名融合 - RRF）來平衡不同檢索方法的影響 18。
+下表比較了檢索增強生成（RAG）系統中使用的各種先進檢索技術，概述了它們的主要優勢、運作機制、權衡和適用場景。
+表 2：先進檢索技術比較
+
+
+技術
+	主要優勢
+	機制/運作方式
+	權衡/考量
+	相關參考
+	自適應與語義分塊
+	提高檢索精確度，提供更相關上下文
+	識別文本自然斷點，生成語義連貫、可變長度分塊；父子檢索連結大小分塊
+	增加預處理複雜度，需精細調整參數
+	15
+	領域特定嵌入微調
+	彌補語義鴻溝，提高領域特定資料檢索準確性
+	使用合成查詢和BM25構建樣本進行列表式微調；適應企業專有術語
+	需要領域特定資料，訓練複雜性高
+	16
+	查詢重寫與擴展
+	改善模糊或複雜查詢的理解，提高檢索相關性
+	將查詢轉換為更精確形式；生成假設文檔；使用多方面回饋進行訓練
+	引入額外計算步驟，可能增加延遲
+	19
+	重新排名（Cross-encoders）
+	顯著提高檢索相關性，過濾不可信來源
+	聯合評估查詢和文檔，捕捉細微關係；多遍檢索優化速度與精確度
+	高計算成本，增加延遲
+	10
+	混合檢索（稀疏+密集）
+	結合詞彙與語義優勢，提高檢索全面性
+	結合BM25（詞彙匹配）與DPR（語義匹配）；使用融合演算法平衡結果
+	融合演算法的選擇與調整複雜性
+	27
+	3.5 處理無法回答和領域外查詢的策略
+為了構建真正穩健和可信的 RAG 系統，必須有效地處理無法回答和領域外的查詢。
+* 無法回答請求的分類：UAEval4RAG 定義了六種無法回答的請求類別：未明確請求、錯誤前提請求、無意義請求、模態受限請求、安全相關請求和資料庫外請求 34。
+* 主動拒絕與幻覺預防：
+   * RAG 系統應設計為適當地拒絕無法回答的請求，以防止幻覺並提高可靠性 34。
+   * 對於無法回答的查詢，可接受的回應包括明確拒絕、要求澄清或質疑請求的前提 37。
+   * 自動資料合成管道可以生成多樣化的無法回答查詢，用於評估和訓練 37。
+* 回退回應：
+   * 當查詢無法從可用文檔中回答時，系統應提供適當的回退回應，例如「抱歉，我不知道」，而不是捏造資訊 9。
+檢索增強生成（RAG）系統的發展正從簡單的單階段檢索向更複雜、多階段的架構演進 27。這種轉變體現在分層索引、父子檢索、查詢重寫和重新排名等技術的採用上 27。這不僅僅是增加功能，而是構建一個更智能、更具適應性的管道，能夠處理多樣化的查詢類型和文檔結構。這種發展方向表明，未來的 RAG 系統將不再是單一的檢索模組，而是模組化、動態的架構，能夠根據查詢複雜度、領域和所需的輸出特性調整其檢索策略。這也意味著需要更複雜的控制機制和評估框架來評估這些複雜管道的效能。
+此外，RAG 中「相關性」的定義正在不斷演變。最初，相關性可能僅指語義相似度。然而，重新排名（29）和元資料策略（18）的引入表明，相關性現在包含「上下文相關性」和「可信度過濾」。查詢重寫（19）旨在精煉用戶的「真實意圖」，這是一種更深層次的相關性。這表明，RAG 系統中的相關性定義正變得越來越複雜，超越了單純的語義接近性，涵蓋了上下文適宜性、事實準確性、可信度以及與用戶意圖的一致性。這意味著 RAG 系統需要整合更精密的「相關性信號」，而不僅僅是嵌入相似度，這可能涉及利用顯式知識圖譜、用戶回饋或基於 LLM 的事實一致性判斷。
+最後，處理無法回答的查詢（34）和防止幻覺（5）是 RAG 系統發展中的一個關鍵主題。無法回答請求的分類（37）提供了一種結構化的方式來分類和管理這些「未知」。這直接解決了可信度問題 2。這表明，為了使 RAG 系統真正值得信賴，它們不僅必須在可能的情況下提供準確的答案，還必須在資訊缺失或模糊時優雅地拒絕或尋求澄清。這需要明確的不確定性量化和「超出範圍」檢測機制，超越了簡單地嘗試回答每個查詢。這對用戶體驗和人工智慧的負責任部署具有深遠的影響。
+4. 穩健 RAG 系統的評估與調試方法
+4.1 檢索效能的關鍵指標
+評估檢索器涉及評估檢索到的分塊是否與給定查詢相關 38。常見的指標包括：
+* 召回率（Recall）：衡量至少一個檢索到的分塊中包含所需關鍵字的百分比（完整關鍵字覆蓋率）1。此外，也衡量連接檢索到的文檔中黃金答案的召回率 39。
+* 精確率（Precision）：1
+* F1 分數（F1-Score）：1
+* 平均倒數排名（Mean Reciprocal Rank, MRR）：38
+* 折現累計增益（Discounted Cumulative Gain, NDCG）：衡量相關性並獎勵正確的排名順序 29。
+* 回答詞元數（Tokens To Answer）：追蹤第一個完全綜合性分塊的索引和所需累計詞元數 1。
+除了檢索之外，整體 RAG 評估還考慮忠實度、答案正確性、答案相關性、上下文精確度、上下文召回率和答案相似度 15。
+4.2 系統評估框架
+評估 RAG 系統由於其混合架構和對動態知識的依賴而帶來獨特的挑戰 1。像 Auepora 這樣的框架提供了一個統一的評估過程，透過評估目標、資料集和指標來系統地檢查 RAG 系統，涵蓋相關性、準確性、忠實度、正確性、延遲和穩健性 15。UAEval4RAG 專門評估 RAG 系統如何處理無法回答的查詢，定義了無法回答類別的分類法，並使用基於 LLM 的指標，如「未回答率」和「可接受率」34。RAGAS 是另一個全面的指標套件，專注於忠實度、相關性和上下文精確度 30。
+4.3 調試工具與迭代開發工作流程
+開發人員通常缺乏用於調試 RAG 組件的整合工具，因為它們的相互關聯性以及在廣闊參數空間中進行低延遲實驗的需求 40。raggy 是一種開發人員工具，結合了可組合 RAG 原語的 Python 庫和用於即時調試的互動式介面 40。它能夠快速探索不同的管道配置，支援使用有限資料進行系統評估，並整合到現有的 Python 工作流程中 40。它提供查詢輸入、檢索器配置（分塊大小、可視化）、LLM 提示編輯和評估選項等功能，有助於迭代優化 40。
+從組件級別到系統級別的 RAG 評估正在演變 1。這表明，雖然可以優化單個組件，但 RAG 系統成功的真正衡量標準在於其端到端效能以及組件之間的協同作用。這種轉變要求評估框架能夠全面評估整個 RAG 管道，而不僅僅是孤立的部分。這意味著指標和調試工具必須支援追蹤檢索和生成階段的問題，這凸顯了 RAG 系統中整合可觀察性的必要性。
+「穩健性」作為 RAG 評估的一個關鍵維度正在興起 41。這包括 LLM 在提供不完美或有雜訊的檢索上下文時的行為，以及 RAG 系統處理無法回答查詢的能力 34。這超越了僅僅在可回答問題上的準確性。這表明 RAG 系統的成熟度正在提高，從純粹的效能轉向將可靠性和安全性作為最重要的考量。
+RAG 系統的複雜性要求專門的調試和開發工具，超越了通用的機器學習框架 40。這些工具對於加速迭代開發過程、使從業者能夠快速診斷和修復檢索失敗以及最終實現 RAG 開發的普及至關重要。這也預示著 RAG 特定工具生態系統的日益壯大。
+向量資料庫索引是 RAG 檢索的基礎組件，直接影響速度和準確性。下表比較了常見的索引演算法，概述了它們的運作原理、優勢、劣勢和適用場景，以幫助讀者理解不同索引選擇如何影響效能，並指導其根據應用需求選擇或配置索引。
+表 3：向量資料庫索引演算法：權衡與適用性
+
+
+演算法
+	機制
+	主要優勢
+	主要劣勢
+	適用性/用例
+	配置影響
+	相關參考
+	HNSW
+	分層圖
+	高查詢速度、高召回率
+	記憶體消耗高，動態更新計算密集
+	低延遲推薦系統，需要快速近似檢索的應用
+	層數、每層連接度
+	21
+	IVF
+	聚類分區
+	適用於大型資料集，減少計算量
+	準確性依賴聚類品質，需要預訓練
+	大型資料集、影像檢索
+	簇的數量和品質
+	21
+	PQ
+	向量壓縮
+	顯著減少記憶體使用，加速距離計算
+	由於壓縮會犧牲部分準確性
+	記憶體受限或需要極高吞吐量的場景，常與IVF結合
+	子向量數量、碼本大小
+	23
+	5. 結論與未來展望
+檢索增強生成（RAG）系統的檢索失敗是一個多方面的挑戰，其根源在於次優的分塊策略、不完善的嵌入模型、對查詢理解的不足以及資料品質和索引效率低下。解決這些問題需要一種全面的方法，從簡單的 RAG 轉向更先進、多階段的架構。
+關鍵的行動建議包括：
+* 優化資料預處理：採用自適應和語義分塊策略，並策略性地整合元資料，以確保檢索到的上下文既精確又全面。
+* 增強嵌入模型：對通用嵌入模型進行領域特定微調，以彌補語義鴻溝和領域不匹配，並考慮使用嵌入壓縮技術來提高效率。
+* 提升查詢理解：實施查詢重寫和分解技術，以更好地解釋模糊、複雜和多輪對話中的用戶意圖。
+* 部署先進檢索機制：利用重新排名器（特別是交叉編碼器）來精煉檢索結果的相關性，並採用混合檢索方法來結合詞彙和語義檢索的優勢。
+* 處理無法回答的查詢：設計 RAG 系統以主動識別並優雅地拒絕無法回答或領域外的查詢，從而防止幻覺並建立用戶信任。
+* 持續評估與調試：使用全面的檢索效能指標和專門的調試工具，如 raggy，來實現迭代改進和確保系統的穩健性。
+RAG 檢索領域的未來研究將集中於以下幾個方面：
+* 動態與自適應分塊：進一步探索能夠根據內容和查詢類型自動調整的分塊策略。
+* 高效領域適應：開發更穩健、更高效的嵌入模型領域適應技術，特別是針對低資源語言和高度專業化領域。
+* LLM 驅動的查詢理解：在複雜、多跳和對話式查詢方面，推進 LLM 驅動的查詢理解和重寫能力。
+* 精細混合檢索與重新排名：探索更複雜的混合檢索和重新排名機制，這些機制可以根據查詢意圖和資料特性動態權衡不同的信號。
+* 不確定性量化與主動拒絕：改進不確定性量化和主動拒絕無法回答或領域外查詢的方法，這對於構建真正值得信賴的人工智慧系統至關重要。
+* 整合評估與調試平台：持續開發整合的評估和調試平台，以加速 RAG 系統的開發和部署。
+* RAG 與其他 LLM 增強技術的協同作用：研究 RAG 與其他 LLM 增強技術（例如，LLM 本身的微調）之間的相互作用，以實現協同效能提升。
+這些進步將使 RAG 系統能夠更有效地克服當前的檢索挑戰，為更準確、可靠和值得信賴的人工智慧應用鋪平道路。
+引用的著作
+1. Retrieval Augmented Generation Evaluation in the Era of Large Language Models: A Comprehensive Survey - arXiv, 檢索日期：6月 6, 2025， https://arxiv.org/html/2504.14891v1
+2. Towards Trustworthy Retrieval Augmented Generation for Large ..., 檢索日期：6月 6, 2025， https://arxiv.org/pdf/2502.06872
+3. Towards Trustworthy Retrieval Augmented Generation for Large Language Models: A Survey - arXiv, 檢索日期：6月 6, 2025， https://arxiv.org/html/2502.06872v1
+4. (PDF) Towards Trustworthy Retrieval Augmented Generation for Large Language Models: A Survey - ResearchGate, 檢索日期：6月 6, 2025， https://www.researchgate.net/publication/388920143_Towards_Trustworthy_Retrieval_Augmented_Generation_for_Large_Language_Models_A_Survey
+5. Retrieval-Augmented Generation for Academic Query Accuracy: Reducing Hallucinations and Improving Contextual Responses - GRENZE Scientific Society, 檢索日期：6月 6, 2025， https://thegrenze.com/pages/servej.php?fn=111.pdf&name=Retrieval-Augmented%20Generation%20for%20Academic%20QueryAccuracy:%20Reducing%20Hallucinations%20and%20ImprovingContextual%20Responses&id=3948&association=GRENZE&journal=GIJET&year=2025&volume=11&issue=1
+6. What is RAG? - Retrieval-Augmented Generation AI Explained - AWS, 檢索日期：6月 6, 2025， https://aws.amazon.com/what-is/retrieval-augmented-generation/
+7. Using the Retrieval-Augmented Generation to Improve the Question-Answering System in Human Health Risk Assessment: The Development and Application - MDPI, 檢索日期：6月 6, 2025， https://www.mdpi.com/2079-9292/14/2/386
+8. RAG failure modes: common pitfalls and solutions - Snorkel AI, 檢索日期：6月 6, 2025， https://snorkel.ai/blog/retrieval-augmented-generation-rag-failure-modes-and-how-to-fix-them/
+9. Seven Failure Points When Engineering a Retrieval Augmented Generation System - arXiv, 檢索日期：6月 6, 2025， https://arxiv.org/html/2401.05856v1
+10. HyperRAG: Enhancing Quality-Efficiency Tradeoffs in Retrieval-Augmented Generation with Reranker KV-Cache Reuse - arXiv, 檢索日期：6月 6, 2025， https://arxiv.org/html/2504.02921v1
+11. Hallucination Mitigation for Retrieval-Augmented Large Language Models: A Review, 檢索日期：6月 6, 2025， https://www.researchgate.net/publication/389587119_Hallucination_Mitigation_for_Retrieval-Augmented_Large_Language_Models_A_Review
+12. A Survey on Knowledge-Oriented Retrieval-Augmented Generation - arXiv, 檢索日期：6月 6, 2025， https://arxiv.org/html/2503.10677v2
+13. (PDF) Rethinking Chunk Size For Long-Document Retrieval: A Multi ..., 檢索日期：6月 6, 2025， https://www.researchgate.net/publication/392167724_Rethinking_Chunk_Size_For_Long-Document_Retrieval_A_Multi-Dataset_Analysis
+14. Advanced Chunking/Retrieving Strategies for Legal Documents : r/Rag - Reddit, 檢索日期：6月 6, 2025， https://www.reddit.com/r/Rag/comments/1jdi4sg/advanced_chunkingretrieving_strategies_for_legal/
+15. Optimizing Retrieval-Augmented Generation: Analysis of Hyperparameter Impact on Performance and Efficiency - arXiv, 檢索日期：6月 6, 2025， https://arxiv.org/html/2505.08445v1
+16. Adapting General-Purpose Embedding Models to Private ... - arXiv, 檢索日期：6月 6, 2025， https://arxiv.org/pdf/2506.00363
+17. PCA-RAG: Principal Component Analysis for Efficient Retrieval-Augmented Generation, 檢索日期：6月 6, 2025， https://arxiv.org/html/2504.08386
+18. Does it help improve retrieval accuracy to insert metadata into ..., 檢索日期：6月 6, 2025， https://www.reddit.com/r/Rag/comments/1l10fjo/does_it_help_improve_retrieval_accuracy_to_insert/
+19. MaFeRw: Query Rewriting with Multi-Aspect Feedbacks for Retrieval ..., 檢索日期：6月 6, 2025， https://ojs.aaai.org/index.php/AAAI/article/view/34732/36887
+20. Query Understanding in LLM-based Conversational Information ..., 檢索日期：6月 6, 2025， https://arxiv.org/pdf/2504.06356
+21. Quake: Adaptive Indexing for Vector Search - arXiv, 檢索日期：6月 6, 2025， https://arxiv.org/html/2506.03437v1
+22. Quake: Adaptive Indexing for Vector Search - arXiv, 檢索日期：6月 6, 2025， https://www.arxiv.org/pdf/2506.03437
+23. How does indexing work in a vector DB (IVF, HNSW, PQ, etc.)?, 檢索日期：6月 6, 2025， https://milvus.io/ai-quick-reference/how-does-indexing-work-in-a-vector-db-ivf-hnsw-pq-etc
+24. Quake: Adaptive Indexing for Vector Search - arXiv, 檢索日期：6月 6, 2025， https://arxiv.org/pdf/2506.03437
+25. EnterpriseEM: Fine-tuned Embeddings for Enterprise Semantic Search, 檢索日期：6月 6, 2025， https://arxiv.org/pdf/2406.00010
+26. ChunkRAG: A Novel LLM-Chunk Filtering Method for RAG Systems - arXiv, 檢索日期：6月 6, 2025， https://arxiv.org/html/2410.19572v5
+27. RAG techniques: From naive to advanced - Weights & Biases - Wandb, 檢索日期：6月 6, 2025， https://wandb.ai/site/articles/rag-techniques/
+28. EnterpriseEM: Fine-tuned Embeddings for Enterprise Semantic Search - arXiv, 檢索日期：6月 6, 2025， https://arxiv.org/pdf/2406.00010?
+29. Re-ranking in RAG: Improve Retrieval with Top Techniques - Chitika, 檢索日期：6月 6, 2025， https://www.chitika.com/re-ranking-in-retrieval-augmented-generation-how-to-use-re-rankers-in-rag/
+30. A Framework for Systematic Evaluation of Retrieval Strategies and Prompt Engineering in RAG Systems - arXiv, 檢索日期：6月 6, 2025， https://arxiv.org/html/2412.12322v1
+31. arxiv.org, 檢索日期：6月 6, 2025， https://arxiv.org/html/2506.00054v1
+32. (PDF) DAT: Dynamic Alpha Tuning for Hybrid Retrieval in Retrieval-Augmented Generation, 檢索日期：6月 6, 2025， https://www.researchgate.net/publication/390354940_DAT_Dynamic_Alpha_Tuning_for_Hybrid_Retrieval_in_Retrieval-Augmented_Generation
+33. Improving RAG Performance: WTF is Hybrid Search? - Fuzzy Labs, 檢索日期：6月 6, 2025， https://www.fuzzylabs.ai/blog-post/improving-rag-performance-hybrid-search
+34. Unanswerability Evaluation for Retrieval Augmented Generation - arXiv, 檢索日期：6月 6, 2025， https://arxiv.org/html/2412.12300v1
+35. Unanswerability Evaluation for Retrieval Augmented Generation - arXiv, 檢索日期：6月 6, 2025， https://arxiv.org/html/2412.12300v3
+36. Unanswerability Evaluation for Retrieval Augmented Generation - OpenReview, 檢索日期：6月 6, 2025， https://openreview.net/pdf/0771291379616cba50cf3811b550a01afd5df187.pdf
+37. arXiv:2412.12300v3 [cs.CL] 21 Apr 2025, 檢索日期：6月 6, 2025， https://arxiv.org/pdf/2412.12300
+38. [Literature Review] Can LLMs Be Trusted for Evaluating RAG Systems? A Survey of Methods and Datasets - Moonlight | AI Colleague for Research Papers, 檢索日期：6月 6, 2025， https://www.themoonlight.io/en/review/can-llms-be-trusted-for-evaluating-rag-systems-a-survey-of-methods-and-datasets
+39. Evaluating the Retrieval Robustness of Large Language Models, 檢索日期：6月 6, 2025， https://arxiv.org/pdf/2505.21870
+40. RAG Without the Lag: Interactive Debugging for Retrieval-Augmented Generation Pipelines, 檢索日期：6月 6, 2025， https://arxiv.org/html/2504.13587v1
+41. [2505.21870] Evaluating the Retrieval Robustness of Large Language Models - arXiv, 檢索日期：6月 6, 2025， https://arxiv.org/abs/2505.21870
+42. Evaluating the Retrieval Robustness of Large Language Models - arXiv, 檢索日期：6月 6, 2025， https://arxiv.org/html/2505.21870v1
+43. Investigating the Performance of Retrieval-Augmented Generation and Domain-Specific Fine-Tuning for the Development of AI-Driven Knowledge-Based Systems - MDPI, 檢索日期：6月 6, 2025， https://www.mdpi.com/2504-4990/7/1/15

@@ -1,0 +1,2 @@
+# d:\Program_project\RAG_MCP_project_ForAlg\requirements.txt
+torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
