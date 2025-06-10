@@ -1,0 +1,42 @@
+[
+  {
+    "question_id": "EN_BST_BTREE_001",
+    "original_question": "From the book's perspective, what are the fundamental structural and performance differences between a standard binary search tree and a B-tree? Why are B-trees preferred for disk-based storage systems?"
+  },
+  {
+    "question_id": "ZH_QUICKSORT_001",
+    "original_question": "請描述「快速排序 (Quicksort)」演算法的核心思想，特別是其 PARTITION (分割) 程序。另外，它的最壞情況 (worst-case) 時間複雜度是多少？在什麼情況下會發生？"
+  },
+  {
+    "question_id": "EN_DP_OPTIMAL_SUBSTRUCTURE_001",
+    "original_question": "The concept of \"optimal substructure\" is critical for dynamic programming. Explain this property in detail and provide an example of a problem that exhibits it, as discussed in the book."
+  },
+  {
+    "question_id": "ZH_MAXFLOW_FORD_FULKERSON_001",
+    "original_question": "書中如何介紹解決「最大流問題 (maximum-flow problem)」的 Ford-Fulkerson 方法？請說明其核心概念，特別是「殘餘網路 (residual network)」和「增廣路徑 (augmenting path)」所扮演的角色。"
+  },
+  {
+    "question_id": "EN_AMORTIZED_POTENTIAL_METHOD_001",
+    "original_question": "Using the dynamic table expansion problem as an example, explain how the \"potential method\" of amortized analysis works. Define the potential function and show how it pays for expensive operations."
+  },
+  {
+    "question_id": "ZH_SORT_COMPARISON_COUNTING_001",
+    "original_question": "比較「基於比較的排序演算法 (comparison sort)」與「非基於比較的排序演算法（如計數排序 Counting Sort）」之間的根本區別是什麼？並說明計數排序的時間複雜度及其限制。"
+  },
+  {
+    "question_id": "EN_NP_REDUCTION_001",
+    "original_question": "Explain the concept of a \"polynomial-time reduction\" (≤_P). Why is this concept so central to the theory of NP-completeness?"
+  },
+  {
+    "question_id": "ZH_FIBONACCI_HEAP_001",
+    "original_question": "描述一個「斐波那契堆 (Fibonacci Heap)」的結構。根據本書，它與傳統的「二元堆 (Binary Heap)」相比，其主要優勢體現在哪些操作上？這使其在哪類演算法中特別有用？"
+  },
+  {
+    "question_id": "EN_GREEDY_ACTIVITY_SELECTION_001",
+    "original_question": "The activity-selection problem is a classic example where a greedy algorithm yields an optimal solution. Describe the specific \"greedy choice\" that works for this problem and briefly justify why it leads to a globally optimal solution."
+  },
+  {
+    "question_id": "ZH_RABIN_KARP_001",
+    "original_question": "請說明「Rabin-Karp 演算法」在字串匹配中的基本思想，特別是它如何利用「雜湊 (hashing)」來有效率地在大文本中尋找模式字串。"
+  }
+]
