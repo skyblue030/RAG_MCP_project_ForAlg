@@ -29,6 +29,54 @@ USE_HYDE_QUERY_EXPANSION = os.getenv("USE_HYDE_QUERY_EXPANSION", "false").lower(
 PERFORM_QUERY_DECOMPOSITION = os.getenv("PERFORM_QUERY_DECOMPOSITION", "false").lower() == "true" # 是否執行查詢分解
 # NUM_CONTEXTS_FOR_LLM = int(os.getenv("NUM_CONTEXTS_FOR_LLM", "6")) # 移除或註解此行，不再需要從 .env 讀取
 # --- Logging Setup ---
+
+# --- Prompt Definitions for Evaluation Mode ---
+EVAL_DECOMPOSITION_PROMPT_TEMPLATE = (
+    "你是一位邏輯分析專家。你的任務是將一個指定的「使用者問題」分解成一系列清晰、獨立、且符合邏輯的子問題。"
+    "這些子問題將作為一份**寫作大綱**，用來指導最終答案的生成，確保最終答案的完整性與結構性。\n\n"
+    "**分解準則：**\n"
+    "1. **完全覆蓋**：所有子問題合起來必須完全覆蓋原始問題的所有面向。\n"
+    "2. **單一職責**：每個子問題應只關注一個核心要點（例如：「是什麼」、「為什麼」、「如何運作」、「優缺點比較」等）。\n"
+    "3. **保持中立**：僅進行問題分解，不要添加額外資訊或嘗試回答問題。\n"
+    "4. **簡潔問題優先**：如果原始問題本身已經足夠簡單，無法有意義地分解，則直接將原始問題作為唯一的子問題輸出。\n\n"
+    "使用者問題：{user_question_for_processing}\n\n"
+    "分解後的子問題清單："
+)
+
+EVAL_HYDE_PROMPT_TEMPLATE = (
+    "你是一位精通技術寫作的專家。你的任務是為以下「問題」生成一個簡潔、專業、且資訊密度極高的「假設性答案」。"
+    "這個假設性答案將被用來在專業教科書中進行語意搜尋，因此它必須聽起來像教科書中的一段精闢論述。\n\n"
+    "**撰寫準則：**\n"
+    "1. **大膽使用專業術語**：直接使用問題領域最核心的術語。\n"
+    "2. **包含可信的細節**：如果問題涉及演算法，可以虛構一個合理的複雜度，如 `O(n log n)`；如果涉及比較，可以直接斷言其優缺點。\n"
+    "3. **專注事實，而非對話**：使用陳述句，避免使用口語化的詞彙。\n"
+    "4. **保持簡潔**：長度控制在 2-4 句話。\n\n"
+    "問題：{user_question_for_processing}\n\n"
+    "假設性答案："
+)
+
+EVAL_FINAL_ANSWER_PROMPT_TEMPLATE = (
+    "你是一位知識淵博、教學經驗豐富的 AI 教授。你的任務是利用以下提供的三項資訊，為「原始問題」合成一份全面、精確、且有條理的最終回答：\n"
+    "1. **原始問題**：使用者最一開始的提問。\n"
+    "2. **回答大綱**：一份由子問題組成的清單，你必須在回答中逐一回應這些子問題。\n"
+    "3. **相關上下文**：從教科書中檢索到的、與問題最相關的原始文本片段。\n\n"
+    
+    "### 高品質回答的準則與指令：\n" # <-- 將兩個標題合併
+    "1. **嚴格遵循大綱**：你的回答結構必須清晰地反映「回答大綱」中的順序和內容，確保每個子問題都得到回應。\n"
+    "2. **絕對忠於上下文**：你的回答中的每一個論點、例子和細節都**必須**直接來源於「相關上下文」。**絕對禁止使用任何外部知識。**\n" # <-- 合併了重複的指令
+    "3. **提取並呈現關鍵細節**：如果上下文中包含定義、數學公式、演算法偽代碼或關鍵參數，你必須將這些精確的細節融入解釋中。\n"
+    "4. **深入解釋「為什麼」**：當子問題涉及原因或原理時，主動在上下文中尋找並總結其背後的理論依據或證明思路。\n"
+    "5. **智慧處理語言**：你的回答應主要使用「原始問題」中的**主要語言**。然而，如果「原始問題」中包含了特定語言的專有名詞（尤其是英文技術術語），請在你的回答中**優先保留這些專有名詞的原文**，而不是將它們翻譯掉，以確保技術的精確性。例如，如果問題是「請解釋 `B-tree` 的 `fan-out`」，你的解釋就應該圍繞 `B-tree` 和 `fan-out` 這兩個詞展開。\n"
+    "6. **處理資訊不足**：如果上下文不足以回答某個子問題，請在回答的相應部分明確指出「根據提供的資料，無法回答關於...的細節」。\n\n"
+    
+    "---[輸入資訊開始]---\n"
+    "**1. 原始問題：**\n{original_user_question}\n\n"
+    "**2. 回答大綱 (子問題清單)：**\n{decomposed_queries_text}\n\n"
+    "**3. 相關上下文：**\n{context_string}\n\n"
+    "---[輸入資訊結束]---\n\n"
+    "**教授的最終回答：**"
+)
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper() # 從 .env 讀取日誌級別，預設為 INFO
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -64,7 +112,7 @@ def get_or_create_chroma_collection(db_path: str, collection_name: str, recreate
             logger.info(f"正在嘗試刪除可能已存在的舊集合 (因 recreate_if_exists=True): {collection_name}...")
             client.delete_collection(name=collection_name)
             logger.info(f"舊集合 '{collection_name}' 已成功刪除。")
-        except chromadb.api.errors.CollectionNotFoundError: # 假設 ChromaDB 有這樣的特定錯誤
+        except chromadb.errors.NotFoundError: # 根據追蹤訊息，應該是 NotFoundError
             logger.info(f"舊集合 '{collection_name}' 不存在，無需刪除。")
         except Exception as delete_exc: # 捕獲其他可能的刪除錯誤
             logger.warning(f"嘗試刪除舊集合 '{collection_name}' 時發生未預期錯誤: {delete_exc}")
@@ -315,7 +363,7 @@ def start_mcp_retrieval_server():
             original_user_question_for_rerank = data.get("original_user_question") # 用於重排的原始問題
 
             if not query_for_initial_retrieval or not original_user_question_for_rerank:
-                return {"error": "Missing 'query' in request body"}, 400
+                return {"error": "Missing 'query_for_retrieval' or 'original_user_question' in request body"}, 400
 
             logger.info(f"收到檢索請求，初步檢索查詢: '{query_for_initial_retrieval}'")
             logger.info(f"  用於重排的原始問題: '{original_user_question_for_rerank}'")
@@ -323,7 +371,7 @@ def start_mcp_retrieval_server():
             # 執行檢索
             try:
                 # 使用本地模型對查詢進行嵌入，normalize_embeddings=True 通常對 BGE 模型是推薦的
-                query_embedding_np = embedding_model_retrieval.encode(query_text, normalize_embeddings=True)
+                query_embedding_np = embedding_model_retrieval.encode(query_for_initial_retrieval, normalize_embeddings=True)
                 query_embedding = query_embedding_np.tolist() # 轉換為 list
             except Exception as e:
                 logger.error(f"本地模型嵌入查詢 '{query_for_initial_retrieval}' 失敗: {e}", exc_info=True)
@@ -531,11 +579,23 @@ def start_qa_application_cli():
     context_string = "\n\n".join(retrieved_contexts_text) 
     # prompt = f"請嚴格根據以下提供的「上下文」資訊來回答「問題」。如果「上下文」中沒有明確提及與「問題」直接相關的內容，請回答「根據提供的資料，我無法找到關於此問題的直接資訊」。絕對不要使用任何「上下文」之外的知識。\n\n上下文：\n{context_string}\n\n問題：{original_user_question}\n\n回答："
     prompt = (
-        f"作為一位知識淵博且樂於助人的AI老師，請你嚴格根據以下提供的「上下文」資訊來回答「問題」。"
-        f"你的回答應該清晰、易懂，並且有條理，就像在向學生解釋概念一樣。"
-        f"如果可能，可以適當使用點列、步驟說明或簡短的例子來幫助理解，但所有解釋都必須基於「上下文」。"
-        f"如果「上下文」中沒有明確提及與「問題」直接相關的內容，請回答「根據提供的資料，我無法找到關於此問題的直接資訊」。"
-        f"請絕對不要使用任何「上下文」之外的知識。\n\n上下文：\n{context_string}\n\n問題：{original_user_question}\n\n回答："
+        f"你是一位知識淵博、教學經驗豐富的 AI 教授。你的任務是利用以下提供的三項資訊，為「原始問題」合成一份全面、精確、且有條理的最終回答：\n"
+        f"1. **原始問題**：使用者最一開始的提問。\n"
+        f"2. **回答大綱**：一份由子問題組成的清單，你必須在回答中逐一回應這些子問題。\n"
+        f"3. **相關上下文**：從教科書中檢索到的、與問題最相關的原始文本片段。\n\n"
+        
+        f"### 高品質回答的準則：\n"
+        f"1. **嚴格遵循大綱**：你的回答結構必須清晰地反映「回答大綱」中的順序和內容，確保每個子問題都得到回應。\n"
+        f"2. **絕對忠於上下文**：你的回答中的每一個論點、例子和細節都**必須**直接來源於「相關上下文」。如果上下文不足以回答某個子問題，請明確指出「根據提供的資料，無法回答關於...的細節」。**絕對禁止使用任何外部知識。**\n"
+        f"3. **提取並呈現關鍵細節**：如果上下文中包含定義、數學公式、演算法偽代碼或關鍵參數，你必須將這些精確的細節融入解釋中。\n"
+        f"4. **深入解釋「為什麼」**：當子問題涉及原因或原理時，主動在上下文中尋找並總結其背後的理論依據或證明思路。\n\n"
+        
+        f"---[輸入資訊開始]---\n"
+        f"**1. 原始問題：**\n{original_user_question}\n\n"
+        f"**2. 回答大綱 (子問題清單)：**\n{decomposed_queries_text}\n\n"
+        f"**3. 相關上下文：**\n{context_string}\n\n"
+        f"---[輸入資訊結束]---\n\n"
+        f"**教授的最終回答：**"
     )
 
     # 4. 調用 Gemini API
@@ -580,10 +640,168 @@ def start_qa_application_cli():
 
     logger.info("問答系統 CLI 已關閉。")
 
+def process_single_query_for_evaluation(original_user_question: str, llm_model, retrieval_service_url: str):
+    """
+    處理單個查詢，執行完整的 RAG 流程，並返回詳細的中間結果和最終答案，
+    以便進行自動化評估。
+
+    Args:
+        original_user_question: 使用者的原始問題。
+        llm_model: 已初始化的 Gemini LLM 模型實例。
+        retrieval_service_url: 檢索服務的 URL。
+
+    Returns:
+        一個字典，包含 RAG 流程各階段的輸出。
+    """
+    logger.debug(f"評估模式：正在處理問題: {original_user_question}")
+    results = {
+        "original_question": original_user_question,
+        "decomposed_queries_text": None,
+        "hypothetical_document": None,
+        "query_for_retrieval": original_user_question, # 預設
+        "retrieved_contexts_from_server": [], # 從伺服器獲取的原始上下文列表 (包含文本和元數據)
+        "final_prompt_to_llm": None,
+        "llm_final_answer": None,
+        "error_message": None
+    }
+    import requests # 確保 requests 已匯入
+
+    user_question_for_processing = original_user_question
+
+    if PERFORM_QUERY_DECOMPOSITION:
+        logger.info(f"評估模式：正在為問題 '{original_user_question}' 進行分解...")
+        decomposition_prompt = EVAL_DECOMPOSITION_PROMPT_TEMPLATE.format(user_question_for_processing=user_question_for_processing)
+        try:
+            decomposition_response = llm_model.generate_content(decomposition_prompt)
+            results["decomposed_queries_text"] = decomposition_response.text.strip()
+        except Exception as e:
+            results["error_message"] = f"問題分解失敗: {e}"
+            logger.error(f"問題 '{original_user_question}' 分解失敗: {e}")
+
+    query_for_retrieval_actual = original_user_question # 預設使用原始問題
+
+    if USE_HYDE_QUERY_EXPANSION:
+        logger.info(f"評估模式：正在為問題 '{original_user_question}' 生成 HyDE...")
+        hyde_prompt = EVAL_HYDE_PROMPT_TEMPLATE.format(user_question_for_processing=user_question_for_processing)
+        try:
+            hyde_response = llm_model.generate_content(hyde_prompt)
+            results["hypothetical_document"] = hyde_response.text.strip()
+            query_for_retrieval_actual = results["hypothetical_document"]
+        except Exception as e:
+            error_msg_hyde = f"HyDE失敗: {e}"
+            results["error_message"] = (results.get("error_message","") + f";{error_msg_hyde}").strip(";")
+            logger.error(f"問題 '{original_user_question}' 的 HyDE 生成失敗: {e}")
+    
+    results["query_for_retrieval"] = query_for_retrieval_actual
+
+    try:
+        logger.info(f"評估模式：正在為問題 '{original_user_question}' 從服務檢索上下文...")
+        payload = {
+            "query_for_retrieval": query_for_retrieval_actual,
+            "original_user_question": original_user_question
+        }
+        response = requests.post(retrieval_service_url, json=payload)
+        response.raise_for_status()
+        retrieval_result_json = response.json()
+        results["retrieved_contexts_from_server"] = retrieval_result_json.get("contexts", [])
+    except Exception as e:
+        error_msg_retrieval = f"檢索失敗: {e}"
+        results["error_message"] = (results.get("error_message","") + f";{error_msg_retrieval}").strip(";")
+        logger.error(f"問題 '{original_user_question}' 的上下文檢索失敗: {e}")
+
+    retrieved_contexts_text_list = [item.get("text", "") for item in results["retrieved_contexts_from_server"]]
+    context_string = "\n\n".join(retrieved_contexts_text_list)
+    
+    final_prompt = EVAL_FINAL_ANSWER_PROMPT_TEMPLATE.format(context_string=context_string, original_question=original_user_question)
+    results["final_prompt_to_llm"] = final_prompt
+
+    try:
+        logger.info(f"評估模式：正在為問題 '{original_user_question}' 生成最終 LLM 回答...")
+        llm_response = llm_model.generate_content(final_prompt)
+        results["llm_final_answer"] = llm_response.text.strip()
+    except Exception as e:
+        error_msg_llm = f"LLM回答生成失敗: {e}"
+        results["error_message"] = (results.get("error_message","") + f";{error_msg_llm}").strip(";")
+        logger.error(f"問題 '{original_user_question}' 的 LLM 回答生成失敗: {e}")
+        if results["llm_final_answer"] is None: # 確保即使失敗也有預設值
+             results["llm_final_answer"] = "無法生成回答因先前錯誤。"
+    return results
+
+def run_evaluation_batch(questions_file_path: str, output_file_path: str):
+    logger.info(f"啟動 RAG 系統批次評估，問題集: {questions_file_path}, 輸出至: {output_file_path}")
+    
+    # 1. 載入評估問題集 (假設是一個 JSON 檔案，包含一個問題列表)
+    try:
+        with open(questions_file_path, 'r', encoding='utf-8') as f:
+            # --- Debugging: Log the start of the file ---
+            file_content_snippet = f.read(200) # 讀取前 200 個字元
+            logger.debug(f"嘗試載入問題集檔案 '{questions_file_path}' 的開頭內容 (前200字元): {file_content_snippet!r}")
+            f.seek(0) # 將檔案指標重設回開頭，以便 json.load 正常工作
+            # --- End Debugging ---
+            evaluation_questions = json.load(f) # 預期格式: [{"question_id": "...", "original_question": "..."}, ...]
+        if not isinstance(evaluation_questions, list):
+            logger.error(f"問題集檔案 {questions_file_path} 的內容不是一個列表。請檢查格式。")
+            return
+    except Exception as e:
+        logger.error(f"載入評估問題集 '{questions_file_path}' 失敗: {e}", exc_info=True)
+        return
+
+    # 2. 初始化 Gemini LLM 模型 (用於 RAG)
+    try:
+        import google.generativeai as genai_llm # 確保匯入
+        api_key = os.getenv(API_KEY_LLM_ENV_VAR)
+        if not api_key:
+            logger.error(f"錯誤：請設定 {API_KEY_LLM_ENV_VAR} 環境變數以供 Gemini LLM 使用。")
+            return
+        genai_llm.configure(api_key=api_key)
+        llm_model_for_rag = genai_llm.GenerativeModel(LLM_MODEL_NAME)
+    except Exception as e:
+        logger.error(f"初始化 Gemini LLM 模型 ({LLM_MODEL_NAME}) 失敗: {e}", exc_info=True)
+        return
+
+    all_evaluation_results = []
+    total_questions = len(evaluation_questions)
+    logger.info(f"將處理 {total_questions} 個評估問題...")
+
+    for i, question_item in enumerate(evaluation_questions):
+        original_question = question_item.get("original_question")
+        question_id = question_item.get("question_id", f"eval_q_{i+1}") # 如果沒有 ID，則生成一個
+
+        if not original_question:
+            logger.warning(f"問題集中的第 {i+1} 個項目缺少 'original_question' 欄位，跳過。")
+            continue
+        
+        logger.info(f"正在處理問題 {i+1}/{total_questions} (ID: {question_id}): {original_question[:100]}...")
+        
+        # 調用處理單個查詢的函數
+        rag_output = process_single_query_for_evaluation(
+            original_user_question=original_question,
+            llm_model=llm_model_for_rag,
+            retrieval_service_url=RETRIEVAL_SERVER_URL
+        )
+        
+        # 將 question_id 添加到結果中
+        rag_output["question_id"] = question_id
+        all_evaluation_results.append(rag_output)
+
+    # 5. 儲存所有結果
+    try:
+        with open(output_file_path, 'w', encoding='utf-8') as f:
+            json.dump(all_evaluation_results, f, ensure_ascii=False, indent=4)
+        logger.info(f"所有 {len(all_evaluation_results)} 個問題的評估結果已儲存到: {output_file_path}")
+    except Exception as e:
+        logger.error(f"儲存評估結果到 '{output_file_path}' 失敗: {e}", exc_info=True)
+
+    logger.info("批次評估完成。")
+
 def main():
     parser = argparse.ArgumentParser(description="智慧型文檔問答系統 (MCP-Enhanced RAG) - 主控制程式")
-    parser.add_argument("action", choices=["ingest", "serve_mcp", "ask_cli"],
-                        help="選擇要執行的操作：'ingest' (處理並索引來源文檔), 'serve_mcp' (啟動 MCP 檢索服務器), 'ask_cli' (啟動命令列問答應用)")
+    parser.add_argument("action", choices=["ingest", "serve_mcp", "ask_cli", "evaluate"],
+                        help="選擇要執行的操作：'ingest', 'serve_mcp', 'ask_cli', 'evaluate' (批次評估)")
+    parser.add_argument("--questions_file", type=str, default="./evaluation_questions.json",
+                        help="用於 'evaluate' 操作的問題集 JSON 檔案路徑。")
+    parser.add_argument("--output_file", type=str, default="./evaluation_results.json",
+                        help="用於 'evaluate' 操作的輸出結果 JSON 檔案路徑。")
     args = parser.parse_args()
 
     if args.action == "ingest":
@@ -594,6 +812,8 @@ def main():
             uvicorn.run(app_instance, host="127.0.0.1", port=8000)
     elif args.action == "ask_cli":
         start_qa_application_cli()
+    elif args.action == "evaluate":
+        run_evaluation_batch(args.questions_file, args.output_file)
 
 if __name__ == "__main__":
     main()
