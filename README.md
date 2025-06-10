@@ -1,45 +1,59 @@
 # RAG MCP Project for Algorithms
 
-這是一個基於檢索增強生成 (RAG) 的智慧型文檔問答系統，專為演算法教科書（例如 "Introduction to Algorithms, 3rd Edition"）設計。它使用本地嵌入模型 (BAAI/bge-m3) 進行文本嵌入與檢索，並結合 Google Gemini API (gemini-1.5-flash-latest) 生成答案。
+This is a Retrieval Augmented Generation (RAG) based intelligent document question-answering system, specifically designed for algorithm textbooks (e.g., "Introduction to Algorithms, 3rd Edition"). It utilizes a local embedding model (BAAI/bge-m3) for text embedding and retrieval, combined with a local Cross-Encoder for re-ranking, and the Google Gemini API (e.g., gemini-1.5-flash-latest) for query processing (decomposition, HyDE) and answer generation.
 
-## 功能特性
+## Features
 
-*   **資料導入與索引 (`ingest`)**:
-    *   從 PDF 文件載入內容。
-    *   將文本切割成適當的區塊。
-    *   使用本地 `BAAI/bge-m3` 模型生成文本嵌入。
-    *   將嵌入向量和文本儲存到本地 ChromaDB 向量資料庫。
-*   **MCP 檢索服務 (`serve_mcp`)**:
-    *   啟動一個 FastAPI 伺服器。
-    *   提供 `/retrieve` API 端點，接收查詢，使用本地嵌入模型生成查詢嵌入，並從 ChromaDB 檢索最相關的上下文片段。
-*   **命令列問答應用 (`ask_cli`)**:
-    *   允許使用者在命令列輸入問題。
-    *   呼叫 MCP 檢索服務獲取相關上下文。
-    *   將問題和上下文傳遞給 Gemini API (gemini-1.5-flash-latest) 生成答案。
-    *   顯示 LLM 的回答以及引用的來源片段。
-*   **配置管理**:
-    *   使用 `.env` 檔案管理所有重要配置（檔案路徑、模型名稱、API 金鑰等）。
-*   **日誌記錄**:
-    *   詳細的日誌記錄，方便追蹤程式執行流程和偵錯。
+*   **Data Ingestion and Indexing (`ingest`)**:
+    *   Loads content from PDF documents.
+    *   Splits text into appropriate chunks (parent and child chunks for better context).
+    *   Generates text embeddings using the local `BAAI/bge-m3` model.
+    *   Stores embedding vectors and corresponding text (child chunks) into a local ChromaDB vector database.
+    *   Saves parent chunks to a JSON file for later retrieval.
+*   **MCP Retrieval Service (`serve_mcp`)**:
+    *   Launches a FastAPI server.
+    *   Provides a `/retrieve` API endpoint that:
+        *   Accepts a query (potentially expanded by HyDE) and the original user question.
+        *   Generates query embeddings using the local embedding model (configured for GPU if available).
+        *   Retrieves relevant child chunks from ChromaDB.
+        *   Fetches corresponding parent chunks.
+        *   Re-ranks the parent chunks using a local Cross-Encoder model (configured for GPU if available) based on the original user question.
+        *   Returns the top re-ranked context passages.
+*   **Command-Line Q&A Application (`ask_cli`)**:
+    *   Allows users to input questions via the command line.
+    *   Optionally performs query decomposition and HyDE query expansion using the LLM (client-side).
+    *   Calls the MCP Retrieval Service to get relevant context.
+    *   Passes the question, (optional) decomposed outline, and context to the Gemini API to generate an answer (client-side).
+    *   Displays the LLM's answer and the cited source passages.
+*   **Batch Evaluation Mode (`evaluate`)**:
+    *   Processes a list of questions from a specified JSON file.
+    *   For each question, performs the full RAG pipeline (optional decomposition, optional HyDE, retrieval via `serve_mcp`, answer generation).
+    *   Records all intermediate outputs (original question, decomposed queries, hypothetical document, retrieved contexts, final prompt, LLM answer, errors) into a structured JSON output file.
+    *   Facilitates systematic testing and iteration of prompts and system performance.
+*   **Configuration Management**:
+    *   Uses a `.env` file to manage all important configurations (file paths, model names, API keys, feature flags, device settings, etc.).
+*   **Logging**:
+    *   Detailed logging for tracing program execution flow and debugging.
 
-## 先決條件
+## Prerequisites
 
 *   Python >= 3.12
-*   `uv` (用於專案和虛擬環境管理，可選，但推薦)
-*   一個有效的 Google Gemini API 金鑰。
+*   `uv` (for project and virtual environment management, optional but recommended)
+*   A valid Google Gemini API Key.
+*   (Optional) A CUDA-enabled GPU for accelerated embedding and re-ranking.
 
-## 安裝步驟
+## Installation
 
-1.  **克隆 (Clone) 專案 (如果適用)**:
+1.  **Clone the Project (if applicable)**:
     ```bash
     git clone <your-repository-url>
-    cd rag-mcp-project-foralg
+    cd RAG_MCP_project_ForAlg
     ```
 
-2.  **建立並啟用虛擬環境**:
-    建議使用 `uv` 來管理虛擬環境和依賴：
+2.  **Create and Activate a Virtual Environment**:
+    Using `uv` is recommended:
     ```bash
-    # 如果您還沒有安裝 uv，請先安裝：pip install uv
+    # If you haven't installed uv: pip install uv
     uv venv
     # Windows
     .\.venv\Scripts\activate
@@ -47,74 +61,84 @@
     # source .venv/bin/activate
     ```
 
-3.  **安裝依賴**:
-    使用 `uv` 安裝 `pyproject.toml` 中定義的依賴：
+3.  **Install Dependencies**:
+    Use `uv` to install dependencies. If your project is configured with a `pyproject.toml` for installation:
     ```bash
-    uv pip install -r requirements.lock  # 或者 uv sync 如果您有 requirements.lock
-    # 如果沒有 lock 檔案，可以直接從 pyproject.toml 安裝
-    # uv pip install .
+    uv pip install .
     ```
-    或者，如果您不使用 `uv`，可以使用 pip：
+    Alternatively, if you have a `requirements.txt` file:
     ```bash
-    pip install -r requirements.txt # 您可能需要先從 pyproject.toml 生成 requirements.txt
-    # 或者 pip install .
+    # uv pip install -r requirements.txt
     ```
+    If not using `uv`, you can use pip:
+    ```bash
+    # pip install .
+    # or pip install -r requirements.txt
+    ```
+    **Note**: Ensure you have the correct PyTorch version installed for your CUDA version if you plan to use GPU acceleration. The `requirements.txt` might specify this (e.g., `torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126`).
 
-## 配置
+## Configuration
 
-在專案根目錄下創建一個名為 `.env` 的檔案，並填入以下內容。請將佔位符替換為您的實際值。
+Create a file named `.env` in the project root directory and fill in the following content. Replace placeholders with your actual values.
 
 ```env
 # d:\Program_project\RAG_MCP_project_ForAlg\.env
 
-PDF_FILE_PATH="./Introduction_to_algorithms-3rd Edition.pdf" # 您的 PDF 檔案路徑
-VECTOR_DB_PATH="./chroma_db" # ChromaDB 本地儲存路徑
-EMBEDDING_MODEL="BAAI/bge-m3" # 本地嵌入模型名稱
-COLLECTION_NAME="my_pdf_collection" # ChromaDB 集合名稱
-RETRIEVAL_SERVER_URL="http://127.0.0.1:8000/retrieve" # MCP 檢索服務 URL
-GOOGLE_API_KEY_LLM="YOUR_ACTUAL_GEMINI_LLM_API_KEY" # 您的 Gemini LLM API 金鑰
-LLM_MODEL_NAME="gemini-1.5-flash-latest" # Gemini LLM 模型名稱
-LOG_LEVEL="INFO" # 日誌級別 (例如 DEBUG, INFO, WARNING, ERROR)
-PARENT_CHUNKS_FILE_PATH="./parent_chunks_store.json" # 父區塊儲存路徑 (用於父子檢索)
-```
-**重要**: 確保將 `YOUR_ACTUAL_GEMINI_LLM_API_KEY` 替換為您有效的 Google Gemini API 金鑰。
+PDF_FILE_PATH="./Introduction_to_algorithms-3rd Edition.pdf" # Path to your PDF file
+VECTOR_DB_PATH="./chroma_db" # Path for ChromaDB local storage
+EMBEDDING_MODEL="BAAI/bge-m3" # Local embedding model name
+COLLECTION_NAME="my_pdf_collection" # ChromaDB collection name
+RETRIEVAL_SERVER_URL="http://127.0.0.1:8000/retrieve" # MCP Retrieval Service URL
+GOOGLE_API_KEY_LLM="YOUR_ACTUAL_GEMINI_LLM_API_KEY" # Your Gemini LLM API Key
+LLM_MODEL_NAME="gemini-1.5-flash-latest" # Gemini LLM model name
+LOG_LEVEL="INFO" # Logging level (e.g., DEBUG, INFO, WARNING, ERROR)
+PARENT_CHUNKS_FILE_PATH="./parent_chunks_store.json" # Path for parent chunk storage (for parent-child retrieval)
+EMBEDDING_DEVICE="cuda" # Device for embedding models (e.g., "cuda", "cpu", "mps", or leave empty for auto-detection)
+CROSS_ENCODER_MODEL_NAME="cross-encoder/ms-marco-MiniLM-L-6-v2" # Cross-encoder model for re-ranking
+NUM_CONTEXTS_AFTER_RERANK="4" # Number of contexts to pass to LLM after re-ranking
+USE_HYDE_QUERY_EXPANSION="true" # Enable/disable HyDE query expansion ("true" or "false")
+PERFORM_QUERY_DECOMPOSITION="true" # Enable/disable query decomposition ("true" or "false")
 
-## 使用方式
+Important: Ensure you replace YOUR_ACTUAL_GEMINI_LLM_API_KEY with your valid Google Gemini API key. Set EMBEDDING_DEVICE to "cpu" if you do not have a CUDA-enabled GPU or encounter issues.
 
-確保您的虛擬環境已啟用。
 
-1.  **資料導入與索引**:
-    首次運行或當 PDF 內容更新時，執行此命令來處理 PDF 並建立向量資料庫。
-    ```bash
-    uv run python main.py ingest
-    ```
+Usage
+Ensure your virtual environment is activated.
 
-2.  **啟動 MCP 檢索服務**:
-    在一個終端視窗中啟動 FastAPI 伺服器。
-    ```bash
-    uv run python main.py serve_mcp
-    ```
-    伺服器將在 `http://127.0.0.1:8000` 上運行。
+Data Ingestion and Indexing: Run this command the first time or when the PDF content is updated to process the PDF and create the vector database.
 
-3.  **啟動命令列問答應用**:
-    在**另一個**終端視窗中啟動 CLI 問答介面。
-    ```bash
-    uv run python main.py ask_cli
-    ```
-    然後您可以輸入您的問題。
+bash
+uv run python main.py ingest
+Start MCP Retrieval Service: Start the FastAPI server in one terminal window.
 
-## 專案結構 (簡要)
+bash
+uv run python main.py serve_mcp
+The server will run on http://127.0.0.1:8000.
 
-*   `main.py`: 主應用程式邏輯，包含資料導入、檢索服務和問答 CLI 的實現。
-*   `pyproject.toml`: 專案元數據和依賴定義。
-*   `.env`: 環境配置檔案 (應被 `.gitignore` 忽略)。
-*   `chroma_db/`: ChromaDB 本地儲存資料庫的目錄 (應被 `.gitignore` 忽略)。
-*   `README.md`: 本檔案。
+Start Command-Line Q&A Application: Start the CLI Q&A interface in another terminal window.
 
-## 貢獻
+bash
+uv run python main.py ask_cli
+You can then type your questions.
 
-歡迎提出問題 (Issues) 和拉取請求 (Pull Requests)。
+Run Batch Evaluation: To evaluate the RAG system on a set of questions:
 
-## 授權條款
+bash
+uv run python main.py evaluate --questions_file ./evaluation_questions.json --output_file ./evaluation_results.json
+--questions_file: Path to your JSON file containing questions (defaults to ./evaluation_questions.json). Each item in the JSON list should be an object with an "original_question" key and an optional "question_id" key.
+--output_file: Path where the evaluation results will be saved (defaults to ./evaluation_results.json).
+Project Structure (Brief)
+main.py: Main application logic, including data ingestion, retrieval service, Q&A CLI, and batch evaluation.
+pyproject.toml: Project metadata and dependency definitions.
+requirements.txt: (Optional) List of dependencies.
+.env: Environment configuration file (should be ignored by .gitignore).
+chroma_db/: Directory for ChromaDB local storage (should be ignored by .gitignore).
+parent_chunks_store.json: Stores parent text chunks for retrieval (generated by ingest).
+evaluation_questions.json: (Example) Input file for batch evaluation.
+evaluation_results.json: (Example) Output file from batch evaluation.
+README.md: This file.
+Contributing
+Issues and Pull Requests are welcome.
 
-請在此處添加您的專案授權條款 (例如 MIT, Apache 2.0 等)。如果未指定，則默認為無授權。
+License
+Please add your project's license terms here (e.g., MIT, Apache 2.0, etc.). If not specified, it defaults to no license.
