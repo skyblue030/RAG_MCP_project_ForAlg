@@ -1,0 +1,24 @@
+[project]
+name = "rag-mcp-project-foralg"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "google-generativeai>=0.5.0", # 確保版本支援 TaskType
+    "chromadb",
+    "PyMuPDF", # fitz 的 PyPI 套件名稱
+    "fastapi",
+    "uvicorn[standard]", # uvicorn 建議加上 [standard] 以包含推薦的依賴
+    "requests",
+    "sentence-transformers",
+    # argparse 是標準函式庫，通常不需要列在這裡
+    "python-dotenv", # 新增 python-dotenv 用於讀取 .env 檔案
+    "langchain-text-splitters",
+    "sqlalchemy",
+
+    # download pytorch in requirements.txt with your cuda
+]
+# name = "pytorch-cu126"
+# url = "https://download.pytorch.org/whl/cu126"
+# explicit = true

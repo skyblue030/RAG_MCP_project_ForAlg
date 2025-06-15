@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+*.log
+# 忽略 chroma_db 資料夾內的全部內容，以避免上傳大型資料檔案
+chroma_db/*
+
+# 但是，不要忽略 .gitkeep 檔案，這樣可以讓 chroma_db 這個空資料夾被 Git 追蹤
+!chroma_db/.gitkeep
