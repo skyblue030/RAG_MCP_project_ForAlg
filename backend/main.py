@@ -123,89 +123,84 @@ class AskRequest(BaseModel):
 # =================================================================
 # 1. 這是我們乾淨、可重用的「檢索食譜」
 # =================================================================
+# =================================================================
+# FINAL API LOGIC - 請將這整塊貼到您的 main.py 中
+# =================================================================
+
 def _perform_retrieval(query_for_retrieval: str, original_user_question: str) -> list[str]:
     """
     這是一個內部輔助函式，專門負責檢索與重排的邏輯。
     它接收查詢字串，並返回一個包含上下文文字的列表。
     """
-    # --- 從共享資源中獲取所有需要的工具 ---
+    # 從共享資源中獲取所有需要的工具
     embedding_model = shared_resources.get("embedding_model")
     cross_encoder = shared_resources.get("cross_encoder")
     collection = shared_resources.get("chroma_collection")
     parent_store = shared_resources.get("parent_store")
 
-    # --- 檢查工具是否齊全 ---
+    # 檢查工具是否齊全
     if not all([embedding_model, cross_encoder, collection, parent_store is not None]):
         logger.error("檢索所需的一個或多個資源未初始化。")
-        return [] # 如果工具不齊全，直接返回一個空列表
+        return []  # 如果工具不齊全，直接返回一個空列表
 
-    # --- 開始按照食譜步驟做菜 ---
     try:
         # 步驟 1: 將查詢問題轉換為向量
+        logger.info("正在生成查詢向量...")
         query_embedding = embedding_model.encode(query_for_retrieval, normalize_embeddings=True).tolist()
-        
+
         # 步驟 2: 從向量資料庫中初步檢索相關的子區塊
+        logger.info("正在查詢向量資料庫...")
         child_results = collection.query(
             query_embeddings=[query_embedding],
-            n_results=10,  # 初步檢索 10 個候選
+            n_results=10,
             include=['metadatas']
         )
 
         # 步驟 3: 根據子區塊找到對應的、不重複的父區塊
+        if not (child_results and child_results['metadatas'] and child_results['metadatas'][0]):
+            logger.warning("初步檢索未找到任何相關的子區塊。")
+            return []
+
         unique_parent_ids = set(
             child_meta['parent_id'] for child_meta in child_results['metadatas'][0] if child_meta.get('parent_id')
         )
         retrieved_parent_contexts_data = [
-            {"text": parent_store.get(p_id), "id": p_id} 
-            for p_id in list(unique_parent_ids) 
+            {"text": parent_store.get(p_id)}
+            for p_id in list(unique_parent_ids)
             if parent_store.get(p_id)
         ]
-        
+
         # 步驟 4: 使用 Cross-Encoder 進行精細重排
         if retrieved_parent_contexts_data and cross_encoder:
-            # 準備好要給 Cross-Encoder 評分的句子對
+            logger.info(f"正在對 {len(retrieved_parent_contexts_data)} 個上下文進行重排...")
             sentence_pairs = [(original_user_question, ctx["text"]) for ctx in retrieved_parent_contexts_data]
-            
-            # 進行評分
-            scores = cross_encoder.predict(sentence_pairs)
-            
-            # 將分數和上下文綁定並排序
+            scores = cross_encoder.predict(sentence_pairs, show_progress_bar=False) # 在伺服器日誌中關閉進度條
             scored_contexts = sorted(zip(scores, retrieved_parent_contexts_data), key=lambda x: x[0], reverse=True)
-            
-            # 選取分數最高的 N 個作為最終結果
             final_contexts_data = [ctx for score, ctx in scored_contexts[:NUM_CONTEXTS_AFTER_RERANK]]
             logger.info(f"成功檢索並重排了 {len(final_contexts_data)} 個上下文。")
-            
-            # 只返回文字內容
             return [item.get("text", "") for item in final_contexts_data]
-        
-        # 如果沒有執行重排，直接返回初步篩選的結果
+
         logger.warning("未執行重排，返回初步檢索結果。")
         return [ctx.get("text", "") for ctx in retrieved_parent_contexts_data[:NUM_CONTEXTS_AFTER_RERANK]]
 
     except Exception as e:
         logger.error(f"執行檢索 (_perform_retrieval) 時發生錯誤: {e}", exc_info=True)
-        return [] # 發生任何錯誤都返回空列表，確保程式穩定
+        return []  # 發生任何錯誤都返回空列表，確保程式穩定
 
 
-# ---  您所有的 API 端點函式直接放在這裡 ---
 @app.post("/ask")
 async def ask_question(ask_request_data: AskRequest):
     """
-    這個 API 端點現在非常乾淨，它接收前端請求，
-    並調度輔助函式來完成複雜的 RAG 工作。
+    這個 API 端點現在非常乾淨，只負責編排整個 RAG 流程。
     """
     original_user_question = ask_request_data.question
     logger.info(f"收到來自前端 /ask 的問題: '{original_user_question[:50]}...'")
 
-    # --- 1. 從共享資源中獲取需要的「總開關」---
-    # 我們只需要 LLM 模型，因為其他模型會在檢索輔助函式中被獲取
     llm_model = shared_resources.get("llm_model")
     if not llm_model:
-        logger.error("LLM 模型未在 lifespan 中成功初始化。")
-        raise HTTPException(status_code=503, detail="LLM 服務當前不可用。")
+        raise HTTPException(status_code=503, detail="LLM 服務未初始化。")
 
-    # --- 2. (可選) HyDE 查詢擴展 ---
+    # HyDE 查詢擴展
     query_for_retrieval = original_user_question
     if USE_HYDE_QUERY_EXPANSION:
         logger.info("正在執行 HyDE 查詢擴展...")
@@ -216,56 +211,51 @@ async def ask_question(ask_request_data: AskRequest):
             logger.info("HyDE 查詢擴展完成。")
         except Exception as e:
             logger.error(f"HyDE 失敗，將使用原始問題進行檢索: {e}", exc_info=True)
-            # 即使失敗，我們依然使用原始問題繼續流程
 
-    # --- 3. 執行內部檢索 (函式呼叫，非網路請求) ---
-    logger.info("正在執行內部檢索...")
-    # 直接呼叫我們之前定義好的 _perform_retrieval 輔助函式
-    # 這裡不再有 requests.post，徹底解決死結問題
-    try:
-        retrieved_contexts_text = _perform_retrieval(
-            query_for_retrieval=query_for_retrieval,
-            original_user_question=original_user_question
-        )
-    except Exception as e:
-        logger.error(f"內部檢索函式 _perform_retrieval 執行時發生錯誤: {e}", exc_info=True)
-        # 如果檢索出錯，我們使用空上下文繼續，讓 LLM 至少能嘗試回答
-        retrieved_contexts_text = []
+    # 內部函式呼叫，以獲取上下文
+    retrieved_contexts_text = _perform_retrieval(
+        query_for_retrieval=query_for_retrieval,
+        original_user_question=original_user_question
+    )
 
-    # --- 4. 建構提示詞 ---
-    # 注意：這裡我們只使用 retrieved_contexts_text，不再有 is not defined 的舊變數
+    # 建構提示詞
     context_string = "\n\n---\n\n".join(retrieved_contexts_text)
-    
     final_prompt = EVAL_FINAL_ANSWER_PROMPT_TEMPLATE.format(
         original_user_question=original_user_question,
-        decomposed_queries_text=original_user_question,  # 簡化：暫時用原始問題作為大綱
+        decomposed_queries_text=original_user_question,
         context_string=context_string
     )
 
-    # --- 5. 生成並回傳最終答案 ---
+    # 生成並回傳最終答案
     logger.info("正在請求 LLM 生成最終回答...")
     try:
         llm_response = llm_model.generate_content(final_prompt)
-        final_answer = llm_response.text or "" # 如果是 None，給一個空字串
-        
-        logger.info(f"成功生成回答 for question: '{original_user_question[:50]}...'")
+        final_answer = llm_response.text or "抱歉，我無法生成回答。"
         return {"answer": final_answer.strip()}
     except Exception as e:
         logger.error(f"LLM 回答生成失敗: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="生成回答時發生內部錯誤。")
 
+
 @app.post("/retrieve")
 async def retrieve_context(request: Request):
-    # ... (解析 request 的 JSON body) ...
-    data = await request.json()
-    query = data.get("query_for_retrieval")
-    original_question = data.get("original_user_question")
+    """
+    這個 API 端點現在只是一個簡單的包裝，
+    核心邏輯已移至 _perform_retrieval。
+    """
+    try:
+        data = await request.json()
+        query = data.get("query_for_retrieval")
+        original_question = data.get("original_user_question")
 
-    # 直接呼叫輔助函式
-    retrieved_texts = _perform_retrieval(query, original_question)
+        if not query or not original_question:
+            raise HTTPException(status_code=400, detail="請求中缺少必要欄位。")
 
-    # FastAPI 會自動將字典轉換為 JSON 回應
-    return {"contexts": [{"text": text} for text in retrieved_texts]}
+        retrieved_texts = _perform_retrieval(query, original_question)
+        return {"contexts": [{"text": text} for text in retrieved_texts]}
+    except Exception as e:
+        logger.error(f"處理 /retrieve 請求時出錯: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="處理檢索請求時發生內部錯誤。")
 
 
 @app.post("/ask_rag_async")
