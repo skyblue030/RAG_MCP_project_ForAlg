@@ -1,20 +1,293 @@
+# -*- Python Standard Library -*-
 import argparse
-import uvicorn # 將 uvicorn 的匯入移到檔案頂部
-import os # 用於讀取環境變數
-import uuid # 用於生成唯一 ID
-import sys # 匯入 sys 模組以便退出程式
-import json # 用於處理父區塊的 JSON 儲存
+import json
 import logging
-from datetime import datetime # 用於時間戳
-from sqlalchemy import create_engine, Column, String, DateTime, Text, ForeignKey, JSON as SQL_JSON # JSON for SQLAlchemy
-from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
-from sqlalchemy.exc import SQLAlchemyError
-from langchain_text_splitters import RecursiveCharacterTextSplitter # 將 import 移到檔案頂部
-from dotenv import load_dotenv
+import os
+import sys
+import uuid
+from datetime import datetime
+
+# -*- Third-Party Libraries -*-
+# 我們把所有外部專家的聯絡電話都放在這裡一次打完
+try:
+    # Web & API
+    import requests
+    import uvicorn
+    from contextlib import asynccontextmanager
+    from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+    from fastapi.middleware.cors import CORSMiddleware
+    from pydantic import BaseModel
+
+    # Database
+    from sqlalchemy import (JSON as SQL_JSON, Column, DateTime, ForeignKey, String,
+                            Text, create_engine)
+    from sqlalchemy.exc import SQLAlchemyError
+    from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
+
+    # AI, NLP & Embeddings
+    import torch
+    import chromadb
+    import google.generativeai as genai_llm
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from sentence_transformers import CrossEncoder, SentenceTransformer
+
+    # Utilities
+    import fitz  # PyMuPDF
+    from dotenv import load_dotenv
+
+except ImportError as e:
+    # 只要上面有任何一個專家聯絡不上，就執行這裡的備用計畫
+    print("錯誤：您的環境缺少必要的函式庫。")
+    print("請在您的 backend 資料夾中，啟用虛擬環境後，執行以下指令來安裝所有依賴：")
+    print("uv pip install -r requirements.txt")
+    print(f"\n詳細錯誤訊息: {e}")
+    sys.exit(1) # 直接退出程式，不往下執行
+
+# 如果程式能執行到這裡，代表所有專家都已就位，可以安心使用
+
+# 一個全域的字典，用來存放共享的模型和資料
+shared_resources = {}
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- 伺服器啟動時執行的程式碼 ---
+    logger.info("伺服器啟動中，開始載入所有資源...")
+    
+    try:
+        # 1. 載入父區塊
+        parent_store = {}
+        if os.path.exists(PARENT_CHUNKS_FILE_PATH):
+            with open(PARENT_CHUNKS_FILE_PATH, 'r', encoding='utf-8') as f:
+                parent_store = json.load(f)
+            logger.info(f"成功載入 {len(parent_store)} 個父區塊。")
+        shared_resources["parent_store"] = parent_store
+
+        # 2. 連接 ChromaDB
+        collection = get_or_create_chroma_collection(VECTOR_DB_PATH, COLLECTION_NAME)
+        shared_resources["chroma_collection"] = collection
+        logger.info(f"向量資料庫集合 '{COLLECTION_NAME}' 載入成功。")
+
+        # 3. 載入 AI 模型 (請確保這幾段都在)
+        device_to_use = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        # 載入 Embedding 模型
+        shared_resources["embedding_model"] = SentenceTransformer(BGE_EMBEDDING_MODEL_NAME, device=device_to_use)
+        logger.info(f"Embedding 模型 ({BGE_EMBEDDING_MODEL_NAME}) 載入成功，使用設備: {device_to_use}")
+
+        # 載入 Cross-Encoder 模型
+        shared_resources["cross_encoder"] = CrossEncoder(CROSS_ENCODER_MODEL_NAME, device=device_to_use)
+        logger.info(f"Cross-Encoder 模型 ({CROSS_ENCODER_MODEL_NAME}) 載入成功。")
+
+        # 載入 Generative LLM
+        api_key = os.getenv(API_KEY_LLM_ENV_VAR)
+        if not api_key:
+            raise ValueError(f"未設定環境變數: {API_KEY_LLM_ENV_VAR}")
+        genai_llm.configure(api_key=api_key)
+        shared_resources["llm_model"] = genai_llm.GenerativeModel(LLM_MODEL_NAME)
+        logger.info(f"Generative LLM ({LLM_MODEL_NAME}) 載入成功。")
+
+    except Exception as e:
+        logger.error(f"資源載入過程中發生致命錯誤: {e}", exc_info=True)
+    
+    logger.info("應用程式啟動準備完成。")
+    yield
+
+    # --- 伺服器關閉時執行的程式碼 ---
+    logger.info("伺服器關閉中，釋放資源...")
+    shared_resources.clear()
+
 
 # 在所有其他程式碼之前載入 .env 檔案中的環境變數
 # 這會查找與此 main.py 同目錄下的 .env 檔案
 load_dotenv(override=True) # 強制使用 .env 檔案中的值覆蓋已存在的環境變數
+
+app = FastAPI(lifespan=lifespan)
+# --- CORS 設定 ---
+origins = [
+    "http://localhost:5173", # 允許您的 React 前端來源
+    "http://127.0.0.1:5173",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"], # 允許所有方法 (GET, POST 等)
+    allow_headers=["*"], # 允許所有標頭
+)
+
+# --- 新增 /ask 端點 ---
+class AskRequest(BaseModel):
+    question: str
+
+# 解決requests.post死結問題
+# =================================================================
+# 1. 這是我們乾淨、可重用的「檢索食譜」
+# =================================================================
+def _perform_retrieval(query_for_retrieval: str, original_user_question: str) -> list[str]:
+    """
+    這是一個內部輔助函式，專門負責檢索與重排的邏輯。
+    它接收查詢字串，並返回一個包含上下文文字的列表。
+    """
+    # --- 從共享資源中獲取所有需要的工具 ---
+    embedding_model = shared_resources.get("embedding_model")
+    cross_encoder = shared_resources.get("cross_encoder")
+    collection = shared_resources.get("chroma_collection")
+    parent_store = shared_resources.get("parent_store")
+
+    # --- 檢查工具是否齊全 ---
+    if not all([embedding_model, cross_encoder, collection, parent_store is not None]):
+        logger.error("檢索所需的一個或多個資源未初始化。")
+        return [] # 如果工具不齊全，直接返回一個空列表
+
+    # --- 開始按照食譜步驟做菜 ---
+    try:
+        # 步驟 1: 將查詢問題轉換為向量
+        query_embedding = embedding_model.encode(query_for_retrieval, normalize_embeddings=True).tolist()
+        
+        # 步驟 2: 從向量資料庫中初步檢索相關的子區塊
+        child_results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=10,  # 初步檢索 10 個候選
+            include=['metadatas']
+        )
+
+        # 步驟 3: 根據子區塊找到對應的、不重複的父區塊
+        unique_parent_ids = set(
+            child_meta['parent_id'] for child_meta in child_results['metadatas'][0] if child_meta.get('parent_id')
+        )
+        retrieved_parent_contexts_data = [
+            {"text": parent_store.get(p_id), "id": p_id} 
+            for p_id in list(unique_parent_ids) 
+            if parent_store.get(p_id)
+        ]
+        
+        # 步驟 4: 使用 Cross-Encoder 進行精細重排
+        if retrieved_parent_contexts_data and cross_encoder:
+            # 準備好要給 Cross-Encoder 評分的句子對
+            sentence_pairs = [(original_user_question, ctx["text"]) for ctx in retrieved_parent_contexts_data]
+            
+            # 進行評分
+            scores = cross_encoder.predict(sentence_pairs)
+            
+            # 將分數和上下文綁定並排序
+            scored_contexts = sorted(zip(scores, retrieved_parent_contexts_data), key=lambda x: x[0], reverse=True)
+            
+            # 選取分數最高的 N 個作為最終結果
+            final_contexts_data = [ctx for score, ctx in scored_contexts[:NUM_CONTEXTS_AFTER_RERANK]]
+            logger.info(f"成功檢索並重排了 {len(final_contexts_data)} 個上下文。")
+            
+            # 只返回文字內容
+            return [item.get("text", "") for item in final_contexts_data]
+        
+        # 如果沒有執行重排，直接返回初步篩選的結果
+        logger.warning("未執行重排，返回初步檢索結果。")
+        return [ctx.get("text", "") for ctx in retrieved_parent_contexts_data[:NUM_CONTEXTS_AFTER_RERANK]]
+
+    except Exception as e:
+        logger.error(f"執行檢索 (_perform_retrieval) 時發生錯誤: {e}", exc_info=True)
+        return [] # 發生任何錯誤都返回空列表，確保程式穩定
+
+
+# ---  您所有的 API 端點函式直接放在這裡 ---
+@app.post("/ask")
+async def ask_question(ask_request_data: AskRequest):
+    """
+    這個 API 端點現在非常乾淨，它接收前端請求，
+    並調度輔助函式來完成複雜的 RAG 工作。
+    """
+    original_user_question = ask_request_data.question
+    logger.info(f"收到來自前端 /ask 的問題: '{original_user_question[:50]}...'")
+
+    # --- 1. 從共享資源中獲取需要的「總開關」---
+    # 我們只需要 LLM 模型，因為其他模型會在檢索輔助函式中被獲取
+    llm_model = shared_resources.get("llm_model")
+    if not llm_model:
+        logger.error("LLM 模型未在 lifespan 中成功初始化。")
+        raise HTTPException(status_code=503, detail="LLM 服務當前不可用。")
+
+    # --- 2. (可選) HyDE 查詢擴展 ---
+    query_for_retrieval = original_user_question
+    if USE_HYDE_QUERY_EXPANSION:
+        logger.info("正在執行 HyDE 查詢擴展...")
+        hyde_prompt = EVAL_HYDE_PROMPT_TEMPLATE.format(user_question_for_processing=original_user_question)
+        try:
+            hyde_response = llm_model.generate_content(hyde_prompt)
+            query_for_retrieval = hyde_response.text.strip()
+            logger.info("HyDE 查詢擴展完成。")
+        except Exception as e:
+            logger.error(f"HyDE 失敗，將使用原始問題進行檢索: {e}", exc_info=True)
+            # 即使失敗，我們依然使用原始問題繼續流程
+
+    # --- 3. 執行內部檢索 (函式呼叫，非網路請求) ---
+    logger.info("正在執行內部檢索...")
+    # 直接呼叫我們之前定義好的 _perform_retrieval 輔助函式
+    # 這裡不再有 requests.post，徹底解決死結問題
+    try:
+        retrieved_contexts_text = _perform_retrieval(
+            query_for_retrieval=query_for_retrieval,
+            original_user_question=original_user_question
+        )
+    except Exception as e:
+        logger.error(f"內部檢索函式 _perform_retrieval 執行時發生錯誤: {e}", exc_info=True)
+        # 如果檢索出錯，我們使用空上下文繼續，讓 LLM 至少能嘗試回答
+        retrieved_contexts_text = []
+
+    # --- 4. 建構提示詞 ---
+    # 注意：這裡我們只使用 retrieved_contexts_text，不再有 is not defined 的舊變數
+    context_string = "\n\n---\n\n".join(retrieved_contexts_text)
+    
+    final_prompt = EVAL_FINAL_ANSWER_PROMPT_TEMPLATE.format(
+        original_user_question=original_user_question,
+        decomposed_queries_text=original_user_question,  # 簡化：暫時用原始問題作為大綱
+        context_string=context_string
+    )
+
+    # --- 5. 生成並回傳最終答案 ---
+    logger.info("正在請求 LLM 生成最終回答...")
+    try:
+        llm_response = llm_model.generate_content(final_prompt)
+        final_answer = llm_response.text or "" # 如果是 None，給一個空字串
+        
+        logger.info(f"成功生成回答 for question: '{original_user_question[:50]}...'")
+        return {"answer": final_answer.strip()}
+    except Exception as e:
+        logger.error(f"LLM 回答生成失敗: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="生成回答時發生內部錯誤。")
+
+@app.post("/retrieve")
+async def retrieve_context(request: Request):
+    # ... (解析 request 的 JSON body) ...
+    data = await request.json()
+    query = data.get("query_for_retrieval")
+    original_question = data.get("original_user_question")
+
+    # 直接呼叫輔助函式
+    retrieved_texts = _perform_retrieval(query, original_question)
+
+    # FastAPI 會自動將字典轉換為 JSON 回應
+    return {"contexts": [{"text": text} for text in retrieved_texts]}
+
+
+@app.post("/ask_rag_async")
+async def ask_rag_asynchronously(request: Request, background_tasks: BackgroundTasks):
+    # 從共享資源中獲取 LLM 模型
+    llm_model = shared_resources.get("llm_model")
+
+    data = await request.json()
+    original_question = data.get("question")
+    conversation_id = data.get("conversation_id") # 從請求中獲取 conversation_id
+
+    if not original_question:
+        return {"error": "請求中缺少 'question' 欄位"}, 400
+    if not llm_model: # 檢查 LLM 模型是否已載入
+            return {"error": "伺服器端 LLM 模型未初始化，無法處理非同步 RAG 請求。"}, 503
+    # 注意：這裡我們假設 conversation_id 是可選的。
+    task_id = str(uuid.uuid4())
+    logger.info(f"收到非同步 RAG 請求，問題: '{original_question[:50]}...'，對話 ID: {conversation_id}，分配任務 ID: {task_id}")
+    
+    background_tasks.add_task(perform_full_rag_in_background, task_id, original_question, conversation_id)
+    
+    return {"message": "請求已接收，正在背景處理中。", "task_id": task_id}
 
 # --- Configuration Constants ---
 # 現在這些值會優先從 .env 檔案讀取，如果 .env 中未定義或為空，則使用提供的預設值
@@ -150,11 +423,6 @@ def get_or_create_chroma_collection(db_path: str, collection_name: str, recreate
     """
     初始化 ChromaDB 客戶端並獲取或創建集合。
     """
-    try:
-        import chromadb
-    except ImportError:
-        logger.error("請先安裝必要的套件: pip install chromadb")
-        return None
 
     client = chromadb.PersistentClient(path=db_path)
     
@@ -197,13 +465,6 @@ def get_or_create_chroma_collection(db_path: str, collection_name: str, recreate
 def run_ingestion_pipeline():
     logger.info("啟動資料導入與索引流程...")
 
-    # 0. 載入嵌入模型 (本地)
-    try:
-        from sentence_transformers import SentenceTransformer
-    except ImportError:
-        logger.error("請先安裝必要的套件: pip install sentence-transformers")
-        return
-
     logger.info(f"正在載入嵌入模型: {BGE_EMBEDDING_MODEL_NAME}...")
     try:
         # 如果 EMBEDDING_DEVICE 有效設定 (例如 "cuda" 或 "cpu")，則使用它
@@ -218,13 +479,6 @@ def run_ingestion_pipeline():
     logger.info(f"嵌入模型使用的設備: {embedding_model.device}")
     logger.info("嵌入模型載入完成。")
 
-    # 1. 文件載入 (PDF) 和文本切割器
-    try:
-        import fitz  # PyMuPDF
-    # from langchain_text_splitters import RecursiveCharacterTextSplitter # 從這裡移除
-    except ImportError:
-        logger.error("請先安裝必要的套件: pip install PyMuPDF") # chromadb is already a general dependency
-        return
 
     logger.info(f"正在載入 PDF: {PDF_FILE_PATH}...")
     doc = fitz.open(PDF_FILE_PATH)
@@ -350,25 +604,17 @@ def start_mcp_retrieval_server():
     # 在伺服器啟動時初始化資料庫 (如果尚未初始化)
     init_db() # <--- 新增調用
 
+    # Imports for FastAPI and Pydantic models
     logger.info("啟動 MCP 檢索服務 (RAG Retrieval Server)...")
-    try:
-        from fastapi import FastAPI, Request
-        from fastapi import BackgroundTasks # 新增 BackgroundTasks
-        from sentence_transformers import SentenceTransformer
-        import chromadb
-        import google.generativeai as genai_llm # 用於背景 RAG 任務的 LLM
-    except ImportError:
-        logger.error("請先安裝必要的套件: pip install fastapi uvicorn chromadb sentence-transformers google-generativeai")
-        return
 
-    app = FastAPI()
+
 
     # 決定服務端模型使用的設備
     device_to_use_serving = EMBEDDING_DEVICE if EMBEDDING_DEVICE in ["cuda", "cpu", "mps"] else None
     logger.info(f"檢索服務將嘗試在設備上載入模型: {device_to_use_serving if device_to_use_serving else '自動檢測'}")
 
     # --- 在伺服器啟動時載入 LLM 模型 (用於 RAG 背景任務) ---
-    llm_model_for_rag_server = None
+    llm_model = None
     api_key_llm = os.getenv(API_KEY_LLM_ENV_VAR)
     if not api_key_llm:
         logger.error(f"錯誤：請設定 {API_KEY_LLM_ENV_VAR} 環境變數以供 Gemini LLM 使用於背景 RAG 任務。")
@@ -376,7 +622,7 @@ def start_mcp_retrieval_server():
     else:
         try:
             genai_llm.configure(api_key=api_key_llm)
-            llm_model_for_rag_server = genai_llm.GenerativeModel(LLM_MODEL_NAME)
+            llm_model = genai_llm.GenerativeModel(LLM_MODEL_NAME)
             logger.info(f"背景 RAG 任務的 LLM 模型 ({LLM_MODEL_NAME}) 載入成功。")
         except Exception as e:
             logger.error(f"背景 RAG 任務載入 LLM 模型 '{LLM_MODEL_NAME}' 失敗: {e}", exc_info=True)
@@ -388,8 +634,8 @@ def start_mcp_retrieval_server():
     # 在伺服器啟動時載入嵌入模型 (只載入一次)
     logger.info(f"檢索服務正在載入嵌入模型: {BGE_EMBEDDING_MODEL_NAME}...")
     try:
-        embedding_model_retrieval = SentenceTransformer(BGE_EMBEDDING_MODEL_NAME, device=device_to_use_serving)
-        logger.info(f"檢索服務嵌入模型 ({BGE_EMBEDDING_MODEL_NAME}) 使用的設備: {embedding_model_retrieval.device}")
+        embedding_model = SentenceTransformer(BGE_EMBEDDING_MODEL_NAME, device=device_to_use_serving)
+        logger.info(f"檢索服務嵌入模型 ({BGE_EMBEDDING_MODEL_NAME}) 使用的設備: {embedding_model.device}")
         logger.info("檢索服務嵌入模型載入完成。")
     except Exception as e:
         logger.error(f"檢索服務載入嵌入模型 '{BGE_EMBEDDING_MODEL_NAME}' 失敗: {e}", exc_info=True)
@@ -414,12 +660,11 @@ def start_mcp_retrieval_server():
         logger.warning(f"父區塊儲存檔案 {PARENT_CHUNKS_FILE_PATH} 未找到。父子檢索可能無法正常工作。")
 
     # --- 在伺服器啟動時載入交叉編碼器模型 (用於重排) ---
-    cross_encoder_retrieval = None
+    cross_encoder = None
     if CROSS_ENCODER_MODEL_NAME:
         logger.info(f"檢索服務正在載入交叉編碼器模型: {CROSS_ENCODER_MODEL_NAME}...")
         try:
-            from sentence_transformers import CrossEncoder # 確保 CrossEncoder 已匯入
-            cross_encoder_retrieval = CrossEncoder(CROSS_ENCODER_MODEL_NAME, device=device_to_use_serving)
+            cross_encoder = CrossEncoder(CROSS_ENCODER_MODEL_NAME, device=device_to_use_serving)
             logger.info(f"檢索服務交叉編碼器模型 ({CROSS_ENCODER_MODEL_NAME}) 已配置使用設備: {device_to_use_serving if device_to_use_serving else '自動檢測'}")
         except Exception as e:
             logger.error(f"檢索服務載入交叉編碼器模型 '{CROSS_ENCODER_MODEL_NAME}' 失敗: {e}", exc_info=True)
@@ -430,7 +675,7 @@ def start_mcp_retrieval_server():
         logger.info(f"背景任務 {task_id}: 開始處理問題 '{original_question[:50]}...'")
         task_results_store[task_id] = {"status": "processing", "original_question": original_question, "answer": None, "retrieved_contexts_summary": None, "error": None}
 
-        if not llm_model_for_rag_server:
+        if not llm_model:
             error_msg = "LLM 模型未成功載入，無法執行 RAG。"
             logger.error(f"背景任務 {task_id}: {error_msg}")
             task_results_store[task_id].update({"status": "failed", "error": error_msg})
@@ -484,7 +729,7 @@ def start_mcp_retrieval_server():
         if PERFORM_QUERY_DECOMPOSITION:
             decomposition_prompt = EVAL_DECOMPOSITION_PROMPT_TEMPLATE.format(user_question_for_processing=original_question)
             try:
-                decomposition_response = llm_model_for_rag_server.generate_content(decomposition_prompt)
+                decomposition_response = llm_model.generate_content(decomposition_prompt)
                 current_rag_results["decomposed_queries_text"] = decomposition_response.text.strip()
             except Exception as e:
                 current_rag_results["error_message_detail"] = f"問題分解失敗: {e}"
@@ -494,7 +739,7 @@ def start_mcp_retrieval_server():
         if USE_HYDE_QUERY_EXPANSION:
             hyde_prompt = EVAL_HYDE_PROMPT_TEMPLATE.format(user_question_for_processing=original_question)
             try:
-                hyde_response = llm_model_for_rag_server.generate_content(hyde_prompt)
+                hyde_response = llm_model.generate_content(hyde_prompt)
                 current_rag_results["hypothetical_document"] = hyde_response.text.strip()
                 query_for_retrieval_actual = current_rag_results["hypothetical_document"]
             except Exception as e:
@@ -503,7 +748,7 @@ def start_mcp_retrieval_server():
 
         # 3. 檢索 (直接調用檢索邏輯，而不是 HTTP call)
         try:
-            query_embedding_np = embedding_model_retrieval.encode(query_for_retrieval_actual, normalize_embeddings=True)
+            query_embedding_np = embedding_model.encode(query_for_retrieval_actual, normalize_embeddings=True)
             query_embedding = query_embedding_np.tolist()
             child_results = collection.query(query_embeddings=[query_embedding], n_results=10, include=['metadatas']) # type: ignore
             
@@ -515,8 +760,8 @@ def start_mcp_retrieval_server():
                     if parent_text:
                         parent_contexts_for_rag.append({"text": parent_text, "metadata": {"source": PDF_FILE_PATH, "retrieved_parent_id": p_id}})
             
-            if parent_contexts_for_rag and cross_encoder_retrieval:
-                current_rag_results["retrieved_contexts_from_server"] = rerank_contexts(original_question, parent_contexts_for_rag, cross_encoder_retrieval, NUM_CONTEXTS_AFTER_RERANK)
+            if parent_contexts_for_rag and cross_encoder:
+                current_rag_results["retrieved_contexts_from_server"] = rerank_contexts(original_question, parent_contexts_for_rag, cross_encoder, NUM_CONTEXTS_AFTER_RERANK)
             else:
                 current_rag_results["retrieved_contexts_from_server"] = parent_contexts_for_rag[:NUM_CONTEXTS_AFTER_RERANK]
         except Exception as e:
@@ -548,7 +793,7 @@ def start_mcp_retrieval_server():
         current_rag_results["final_prompt_to_llm"] = final_llm_prompt_to_use
 
         try:
-            llm_response = llm_model_for_rag_server.generate_content(final_llm_prompt_to_use) # 這裡不使用 stream=True，因為是背景任務
+            llm_response = llm_model.generate_content(final_llm_prompt_to_use) # 這裡不使用 stream=True，因為是背景任務
             current_rag_results["llm_final_answer"] = llm_response.text.strip()
             task_results_store[task_id].update({"status": "completed", "answer": current_rag_results["llm_final_answer"], "retrieved_contexts_summary": [ctx.get('metadata', {}) for ctx in current_rag_results["retrieved_contexts_from_server"]]})
             logger.info(f"背景任務 {task_id}: 完成。")
@@ -580,99 +825,7 @@ def start_mcp_retrieval_server():
                     finally:
                         db_for_ai_msg.close()
 
-    @app.post("/retrieve")
-    async def retrieve_context(request: Request):
-        """
-        接收查詢，從向量資料庫檢索相關上下文。
-        這是一個簡化的 MCP 檢索介面模擬。
-        """
-        try:
-            data = await request.json()
-            query_for_initial_retrieval = data.get("query_for_retrieval") # 用於初步檢索的查詢 (可能是 HyDE)
-            original_user_question_for_rerank = data.get("original_user_question") # 用於重排的原始問題
-
-            if not query_for_initial_retrieval or not original_user_question_for_rerank:
-                return {"error": "Missing 'query_for_retrieval' or 'original_user_question' in request body"}, 400
-
-            logger.info(f"收到檢索請求，初步檢索查詢: '{query_for_initial_retrieval}'")
-            logger.info(f"  用於重排的原始問題: '{original_user_question_for_rerank}'")
-
-            # 執行檢索
-            try:
-                # 使用本地模型對查詢進行嵌入，normalize_embeddings=True 通常對 BGE 模型是推薦的
-                query_embedding_np = embedding_model_retrieval.encode(query_for_initial_retrieval, normalize_embeddings=True)
-                query_embedding = query_embedding_np.tolist() # 轉換為 list
-            except Exception as e:
-                logger.error(f"本地模型嵌入查詢 '{query_for_initial_retrieval}' 失敗: {e}", exc_info=True)
-                return {"error": f"無法使用本地模型嵌入查詢: {e}"}, 500
-
-            # 1. 檢索相關的子區塊，可以檢索比最終需要的父區塊數量更多的子區塊
-            # 以便有更多機會找到不同的父區塊，或為重排提供更多候選
-            num_child_candidates = 10 # 增加初步檢索的子區塊候選數量，以便為重排提供更多選擇
-            child_results = collection.query( # type: ignore
-                query_embeddings=[query_embedding],
-                n_results=num_child_candidates,
-                include=['metadatas'] # 只需要元數據來獲取 parent_id
-            )
-
-            retrieved_parent_contexts = []
-            if child_results and child_results['metadatas'] and child_results['metadatas'][0]:
-                unique_parent_ids = set()
-                for child_meta in child_results['metadatas'][0]:
-                    parent_id = child_meta.get('parent_id')
-                    if parent_id:
-                        unique_parent_ids.add(parent_id)
-                
-                logger.info(f"從 {len(child_results['metadatas'][0])} 個子區塊中找到 {len(unique_parent_ids)} 個唯一的父區塊 ID。")
-
-                # 獲取父區塊文本，這裡獲取所有找到的唯一父區塊，後續由重排器篩選
-                num_final_parent_contexts = len(unique_parent_ids) # 獲取所有唯一父區塊
-                for p_id in list(unique_parent_ids)[:num_final_parent_contexts]:
-                    parent_text = parent_store.get(p_id)
-                    if parent_text:
-                        retrieved_parent_contexts.append({
-                            "text": parent_text,
-                            "metadata": {"source": PDF_FILE_PATH, "retrieved_parent_id": p_id} # 可以添加更多父區塊元數據
-                        })
-                    else:
-                        logger.warning(f"未在父區塊儲存中找到 parent_id '{p_id}' 對應的文本。")
-            
-            logger.info(f"初步檢索到 {len(retrieved_parent_contexts)} 個父區塊上下文片段。")
-
-            # 在伺服器端進行重排
-            if retrieved_parent_contexts and cross_encoder_retrieval:
-                logger.info(f"準備對 {len(retrieved_parent_contexts)} 個上下文進行重排 (使用原始問題)...")
-                reranked_contexts_for_client = rerank_contexts(
-                    original_user_question_for_rerank, # 使用原始問題進行重排
-                    retrieved_parent_contexts,
-                    cross_encoder_retrieval,
-                    NUM_CONTEXTS_AFTER_RERANK # 使用 .env 中定義的數量
-                )
-                logger.info(f"重排後，將返回 {len(reranked_contexts_for_client)} 個上下文給客戶端。")
-                return {"contexts": reranked_contexts_for_client}
-            return {"contexts": retrieved_parent_contexts[:NUM_CONTEXTS_AFTER_RERANK]} # 如果不重排或無交叉編碼器，則按數量截斷
-
-        except Exception as e:
-            logger.error(f"檢索過程中發生錯誤: {e}", exc_info=True)
-            return {"error": str(e)}, 500
-
-    @app.post("/ask_rag_async")
-    async def ask_rag_asynchronously(request: Request, background_tasks: BackgroundTasks):
-        data = await request.json()
-        original_question = data.get("question")
-        conversation_id = data.get("conversation_id") # 從請求中獲取 conversation_id
-
-        if not original_question:
-            return {"error": "請求中缺少 'question' 欄位"}, 400
-        if not llm_model_for_rag_server: # 檢查 LLM 模型是否已載入
-             return {"error": "伺服器端 LLM 模型未初始化，無法處理非同步 RAG 請求。"}, 503
-        # 注意：這裡我們假設 conversation_id 是可選的。
-        task_id = str(uuid.uuid4())
-        logger.info(f"收到非同步 RAG 請求，問題: '{original_question[:50]}...'，對話 ID: {conversation_id}，分配任務 ID: {task_id}")
-        
-        background_tasks.add_task(perform_full_rag_in_background, task_id, original_question, conversation_id)
-        
-        return {"message": "請求已接收，正在背景處理中。", "task_id": task_id}
+    
 
     @app.get("/task_status/{task_id}")
     async def get_task_status(task_id: str):
@@ -680,6 +833,7 @@ def start_mcp_retrieval_server():
         if not result:
             return {"error": "任務 ID 不存在或任務尚未開始處理。"}, 404
         return result
+
 
     return app # <--- 新增：返回 FastAPI 應用程式實例
 
@@ -721,14 +875,7 @@ def rerank_contexts(query: str, contexts_with_metadata: list, cross_encoder_mode
 
 def start_qa_application_cli():
     logger.info("啟動智慧型文檔問答系統 CLI...")
-    try:
-        # 仍然需要 google.generativeai 用於 LLM (Gemini)
-        import google.generativeai as genai_llm
-        import requests # 用於呼叫 MCP 檢索服務
-        # from sentence_transformers import CrossEncoder # 不再需要在 CLI 中載入
-    except ImportError:
-        logger.error("請先安裝必要的套件: pip install google-generativeai requests sentence-transformers")
-        return
+    
 
     # --- 配置 Gemini LLM API ---
     # 注意：這裡的 API 金鑰是給 LLM (gemini-1.5-flash-latest) 使用的，不是嵌入模型
@@ -873,28 +1020,22 @@ def start_qa_application_cli():
     # 2. 作為 MCP 客戶端，向您搭建的「MCP 檢索服務」發送請求
     logger.info(f"\n正在向檢索服務 ({RETRIEVAL_SERVER_URL}) 請求上下文...")
     try:
-        # 向檢索服務發送 query_for_retrieval (可能為 HyDE) 和 original_user_question (用於重排)
-        payload = {
-            "query_for_retrieval": query_for_retrieval,
-            "original_user_question": original_user_question
-        }
-        response = requests.post(RETRIEVAL_SERVER_URL, json=payload)
-        response.raise_for_status() # 如果請求失敗 (非 2xx 狀態碼)，拋出異常
-        retrieval_result = response.json()
-        # 現在從伺服器接收到的上下文已經是重排和篩選過的
-        retrieved_items_for_llm_and_display = retrieval_result.get("contexts", [])
-        logger.info(f"從檢索服務獲取到 {len(retrieved_items_for_llm_and_display)} 個（已重排的）上下文片段。")
+        # 直接呼叫我們之前建立的 _perform_retrieval 輔助函式
+        # 傳入需要的參數即可
+        retrieved_contexts_text = _perform_retrieval(
+            query_for_retrieval=query_for_retrieval,
+            original_user_question=original_user_question
+        )
+        # 我們可以假設 retrieved_metadatas 和 retrieved_items_for_llm_and_display
+        # 在這個簡化流程中暫時不需要，或者 _perform_retrieval 可以回傳一個更豐富的物件
+        
+        logger.info(f"成功從內部檢索到 {len(retrieved_contexts_text)} 個上下文片段。")
 
-        # 從返回的項目中提取文本和元數據
-        retrieved_contexts_text = [item.get("text", "") for item in retrieved_items_for_llm_and_display]
-        retrieved_metadatas = [item.get("metadata", {}) for item in retrieved_items_for_llm_and_display]
-
-    except requests.exceptions.RequestException as e:
-        logger.error(f"呼叫檢索服務失敗: {e}", exc_info=True)
-        logger.warning("將使用空上下文進行回答。")
+    except Exception as e:
+        # 錯誤處理變得更通用，因為不再有網路請求的特定錯誤
+        logger.error(f"在執行內部檢索時發生錯誤: {e}", exc_info=True)
+        logger.warning("檢索失敗，將使用空上下文進行回答。")
         retrieved_contexts_text = []
-        retrieved_metadatas = []
-        retrieved_items_for_llm_and_display = []
 
     # 3. 建構最終的提示 (prompt) 給 Gemini
     # 將所有檢索到的上下文都傳遞給 LLM
@@ -1017,7 +1158,6 @@ def process_single_query_for_evaluation(original_user_question: str, llm_model, 
         "llm_final_answer": None,
         "error_message": None
     }
-    import requests # 確保 requests 已匯入
 
     user_question_for_processing = original_user_question
 
@@ -1105,7 +1245,6 @@ def run_evaluation_batch(questions_file_path: str, output_file_path: str):
 
     # 2. 初始化 Gemini LLM 模型 (用於 RAG)
     try:
-        import google.generativeai as genai_llm # 確保匯入
         api_key = os.getenv(API_KEY_LLM_ENV_VAR)
         if not api_key:
             logger.error(f"錯誤：請設定 {API_KEY_LLM_ENV_VAR} 環境變數以供 Gemini LLM 使用。")
@@ -1173,4 +1312,4 @@ def main():
         run_evaluation_batch(args.questions_file, args.output_file)
 
 if __name__ == "__main__":
-    main()
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)

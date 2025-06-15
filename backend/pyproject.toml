@@ -16,6 +16,8 @@ dependencies = [
     "python-dotenv", # 新增 python-dotenv 用於讀取 .env 檔案
     "langchain-text-splitters",
     "sqlalchemy",
+    "pydantic",
+    "fastapi-cors",
 
     # download pytorch in requirements.txt with your cuda
 ]
